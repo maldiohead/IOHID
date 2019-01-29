@@ -29,6 +29,7 @@
 #include "IOHIDPrivateKeys.h"
 #include "IOHIDDebug.h"
 #include "ev_keymap.h"
+#include "IOHIDUsageTables.h"
 
 typedef struct __attribute__((packed)) GenericKeyboardRpt {
     UInt8 modifiers;
@@ -192,7 +193,7 @@ bool IOHIDKeyboardEventDevice::handleStart( IOService * provider )
 }
 
 bool IOHIDKeyboardEventDevice::start( IOService * provider ) {
-  bool success;
+  bool success = false;
   
   if ( !super::start(provider) ) {
     HIDLogError ("failed");
@@ -207,7 +208,7 @@ bool IOHIDKeyboardEventDevice::start( IOService * provider ) {
                                             (UpdateEventFlagsCallback)     _updateEventFlags
                                             );
   provider->setProperty(kIOHIDResetPointerKey, kOSBooleanTrue);
-  return true;
+  return success;
 }
 
 IOReturn IOHIDKeyboardEventDevice::newReportDescriptor(IOMemoryDescriptor ** descriptor ) const
@@ -428,13 +429,13 @@ void IOHIDKeyboardEventDevice::postConsumerEvent(UInt8 key, bool keyDown)
           return;
     }
 
-    for (int i=0; i< (sizeof(report->consumerKeys)); i++)
+    for (unsigned int i=0; i< (sizeof(report->consumerKeys)); i++)
     {                
         if (report->consumerKeys[i] == usbKey)
         {
             if (keyDown) return;
                 
-            for (int j=i; j<(sizeof(report->consumerKeys) - 1); j++)
+            for (unsigned int j=i; j<(sizeof(report->consumerKeys) - 1); j++)
                 report->consumerKeys[j] = report->consumerKeys[j+1];
                 
             report->consumerKeys[sizeof(report->consumerKeys) - 1] = 0;
@@ -540,7 +541,7 @@ OSString * IOHIDKeyboardEventDevice::newProductString() const
 }
 
 
-IOReturn IOHIDKeyboardEventDevice::message(UInt32 type, IOService * provider, void * argument)
+IOReturn IOHIDKeyboardEventDevice::message(UInt32 type, IOService * provider, void * argument __unused)
 {
   IOReturn     status = kIOReturnSuccess;
   
@@ -559,14 +560,14 @@ void IOHIDKeyboardEventDevice::_keyboardEvent (
                                  unsigned   eventType,
                                  unsigned   flags,
                                  unsigned   key,
-                                 unsigned   charCode,
-                                 unsigned   charSet,
-                                 unsigned   origCharCode,
-                                 unsigned   origCharSet,
-                                 unsigned   keyboardType,
+                                 unsigned   charCode __unused,
+                                 unsigned   charSet __unused,
+                                 unsigned   origCharCode __unused,
+                                 unsigned   origCharSet __unused,
+                                 unsigned   keyboardType __unused,
                                  bool       repeat,
-                                 AbsoluteTime ts,
-                                 OSObject * sender,
+                                 AbsoluteTime ts __unused,
+                                 OSObject * sender __unused,
                                  void *     refcon __unused)
 {
   if (repeat) {
@@ -586,13 +587,13 @@ void IOHIDKeyboardEventDevice::_keyboardEvent (
 void IOHIDKeyboardEventDevice::_keyboardSpecialEvent(
                                 IOHIDKeyboardEventDevice * self,
                                 unsigned   eventType,
-                                unsigned   flags,
-                                unsigned   key,
+                                unsigned   flags __unused,
+                                unsigned   key __unused,
                                 unsigned   flavor,
-                                UInt64     guid,
-                                bool       repeat,
-                                AbsoluteTime ts,
-                                OSObject * sender,
+                                UInt64     guid __unused,
+                                bool       repeat __unused,
+                                AbsoluteTime ts __unused,
+                                OSObject * sender __unused,
                                 void *     refcon __unused)
 {
 
@@ -607,7 +608,7 @@ void IOHIDKeyboardEventDevice::_keyboardSpecialEvent(
 void IOHIDKeyboardEventDevice::_updateEventFlags(
                                     IOHIDKeyboardEventDevice * self,
                                     unsigned      flags,
-                                    OSObject *    sender,
+                                    OSObject *    sender __unused,
                                     void *        refcon __unused)
 {
     self->postFlagKeyboardEvent(flags);

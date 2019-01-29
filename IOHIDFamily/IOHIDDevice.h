@@ -30,6 +30,7 @@
 #include <IOKit/IOBufferMemoryDescriptor.h>
 #include <IOKit/hidsystem/IOHIDDescriptorParser.h>
 #include <IOKit/hid/IOHIDKeys.h>
+#include <IOKit/hid/IOHIDUsageTables.h>
 #include <IOKit/IOEventSource.h>
 
 class   IOHIDSystem;
@@ -59,9 +60,9 @@ typedef void (*IOHIDCompletionAction)(
 /*!
     @typedef IOHIDCompletion
     @abstract Struct spefifying action to perform when set/get report completes.
-    @param target The target to pass to the action function.
-    @param action The function to call.
-    @param parameter The parameter to pass to the action function.
+    @var target The target to pass to the action function.
+    @var action The function to call.
+    @var parameter The parameter to pass to the action function.
 */
 typedef struct IOHIDCompletion {
     void * 			target;
@@ -78,7 +79,8 @@ typedef struct IOHIDCompletion {
 */
 enum
 {
-    kIOHIDReportOptionNotInterrupt	= 0x100
+    kIOHIDReportOptionNotInterrupt	= 0x100,
+    kIOHIDReportOptionVariableSize  = 0x200
 };
 
 
@@ -132,6 +134,7 @@ private:
         IOHIDAsyncReportQueue * asyncReportQueue;
         IOWorkLoop *            workLoop;
         IOEventSource *         eventSource;
+        IONotifier *            deviceNotify;
     };
     /*! @var reserved
         Reserved for future use.  (Internal use only)  */
@@ -191,7 +194,7 @@ protected:
     @discussion Release all resources that were previously allocated,
     then call super::free() to propagate the call to our superclass. */
 
-    virtual void free();
+    virtual void free() APPLE_KEXT_OVERRIDE;
 
 /*! @function handleOpen
     @abstract Handle a client open on the interface.
@@ -206,7 +209,7 @@ protected:
 
     virtual bool handleOpen(IOService *  client,
                             IOOptionBits options,
-                            void *       argument);
+                            void *       argument) APPLE_KEXT_OVERRIDE;
 
 /*! @function handleClose
     @abstract Handle a client close on the interface.
@@ -219,7 +222,7 @@ protected:
     @param client The client object that requested the close.
     @param options Options passed to IOService::close(). */
 
-    virtual void handleClose(IOService * client, IOOptionBits options);
+    virtual void handleClose(IOService * client, IOOptionBits options) APPLE_KEXT_OVERRIDE;
 
 /*! @function handleIsOpen
     @abstract Query whether a client has an open on the interface.
@@ -228,7 +231,7 @@ protected:
     @result true if the specified client, or any client if none (0) is
     specified, presently has an open on this object. */
 
-    virtual bool handleIsOpen(const IOService * client) const;
+    virtual bool handleIsOpen(const IOService * client) const APPLE_KEXT_OVERRIDE;
 
 /*! @function handleStart
     @abstract Prepare the hardware and driver to support I/O operations.
@@ -271,7 +274,7 @@ protected:
                                    void *          security_id,
                                    UInt32          type,
                                    OSDictionary *  properties,
-                                   IOUserClient ** handler );
+                                   IOUserClient ** handler ) APPLE_KEXT_OVERRIDE;
     IOReturn newUserClientInternal(task_t          owningTask,
                                    void *          security_id,
                                    OSDictionary *  properties,
@@ -300,11 +303,11 @@ public:
     @discussion Prime the IOHIDDevice object and prepare it to support
     a probe() or a start() call. This implementation will simply call
     super::init().
-    @param A dictionary A property table associated with this IOHIDDevice
+    @param dictionary A dictionary associated with this IOHIDDevice
     instance.
     @result True on sucess, or false otherwise. */
 
-    virtual bool init( OSDictionary * dictionary = 0 );
+    virtual bool init( OSDictionary * dictionary = 0 ) APPLE_KEXT_OVERRIDE;
 
 /*! @function start
     @abstract Start up the driver using the given provider.
@@ -317,7 +320,7 @@ public:
     to run with.
     @result True on success, or false otherwise. */
 
-    virtual bool start( IOService * provider );
+    virtual bool start( IOService * provider ) APPLE_KEXT_OVERRIDE;
 
 /*! @function stop
     @abstract Called by a provider (during its termination) before detaching
@@ -326,7 +329,7 @@ public:
     resources. Subclasses are recommended to override handleStop().
     @param provider The provider that the driver was started on. */
 
-    virtual void stop( IOService * provider );
+    virtual void stop( IOService * provider ) APPLE_KEXT_OVERRIDE;
 
 /*! @function matchPropertyTable
     @abstract Called by the provider during a match
@@ -335,7 +338,7 @@ public:
     @param table The property table that this device will match against
 */
 
-    virtual bool matchPropertyTable(OSDictionary * table, SInt32 * score);
+    virtual bool matchPropertyTable(OSDictionary * table, SInt32 * score) APPLE_KEXT_OVERRIDE;
 
 /*! @function message
     @abstract Receives messages delivered from an attached provider.
@@ -347,7 +350,7 @@ public:
     @result An IOReturn code defined by the message type.
 */
 
-    virtual IOReturn message( UInt32 type, IOService * provider,  void * argument = 0 );
+    virtual IOReturn message( UInt32 type, IOService * provider,  void * argument = 0 ) APPLE_KEXT_OVERRIDE;
 
 /*! @function newTransportString
     @abstract Returns a string object that describes the transport
@@ -704,9 +707,19 @@ public:
     on the object returned. */
     OSMetaClassDeclareReservedUsed(IOHIDDevice, 11);
     virtual OSArray * newDeviceUsagePairs();
-
-    OSMetaClassDeclareReservedUnused(IOHIDDevice, 12);
-    OSMetaClassDeclareReservedUnused(IOHIDDevice, 13);
+    
+protected:
+    /*! @function createInterface
+     @abstract Creates an IOHIDInterface nub for the device to attach to.
+     @result true on success, false otherwise. */
+    OSMetaClassDeclareReservedUsed(IOHIDDevice, 12);
+    virtual bool createInterface(IOOptionBits options = 0);
+    
+    /*! @function destroyInterface
+     @abstract Destroys the IOHIDInterface nub attached to the device. */
+    OSMetaClassDeclareReservedUsed(IOHIDDevice, 13);
+    virtual void destroyInterface(IOOptionBits options = 0);
+    
     OSMetaClassDeclareReservedUnused(IOHIDDevice, 14);
     OSMetaClassDeclareReservedUnused(IOHIDDevice, 15);
     OSMetaClassDeclareReservedUnused(IOHIDDevice, 16);

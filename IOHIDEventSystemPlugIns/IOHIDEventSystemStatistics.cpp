@@ -21,27 +21,23 @@
 #include <IOKit/hid/AppleHIDUsageTables.h>
 #include <IOKit/hid/IOHIDUsageTables.h>
 #include <IOKit/hid/IOHIDKeys.h>
+#include <IOKit/hid/IOHIDLibPrivate.h>
 #include <notify.h>
 #include <pthread.h>
-#include <asl.h>
 #include <fcntl.h>
 #include <mach/mach.h>
 #include <mach/mach_time.h>
 #include "IOHIDEventSystemStatistics.h"
 #include "IOHIDDebug.h"
-
+#include "CF.h"
+#include <WirelessDiagnostics/AWDSimpleMetrics.h>
+#include "IOHIDFamilyCoverHESTEvents.hpp"
+#include "AWDMetricIds_IOHIDFamily.h"
 
 #define kAggregateDictionaryKeyboardEnumerationCountKey         "com.apple.iokit.hid.keyboard.enumerationCount"
 #define kAggregateDictionaryHomeButtonWakeCountKey              "com.apple.iokit.hid.homeButton.wakeCount"
 #define kAggregateDictionaryPowerButtonWakeCountKey             "com.apple.iokit.hid.powerButton.wakeCount"
 #define kAggregateDictionaryPowerButtonSleepCountKey            "com.apple.iokit.hid.powerButton.sleepCount"
-
-#define kAggregateDictionaryPowerButtonPressedCountKey              "com.apple.iokit.hid.powerButton.pressed"
-#define kAggregateDictionaryPowerButtonFilteredCountKey             "com.apple.iokit.hid.powerButton.filtered"
-#define kAggregateDictionaryVolumeIncrementButtonPressedCountKey    "com.apple.iokit.hid.volumeIncrementButton.pressed"
-#define kAggregateDictionaryVolumeIncrementButtonFilteredCountKey   "com.apple.iokit.hid.volumeIncrementButton.filtered"
-#define kAggregateDictionaryVolumeDecrementButtonPressedCountKey    "com.apple.iokit.hid.volumeDecrementButton.pressed"
-#define kAggregateDictionaryVolumeDecrementButtonFilteredCountKey   "com.apple.iokit.hid.volumeDecrementButton.filtered"
 
 #define kAggregateDictionaryButtonsHighLatencyCountKey          "com.apple.iokit.hid.buttons.highLatencyCount"
 #define kAggregateDictionaryButtonsHighLatencyMinMS             10000
@@ -61,20 +57,24 @@
 #define kAggregateDictionaryAppleKeyboardCursorCountKey         "com.apple.iokit.hid.keyboard.cursorKey.count"
 #define kAggregateDictionaryAppleKeyboardModifierCountKey       "com.apple.iokit.hid.keyboard.modifierKey.count"
 
+#define kAggregateDictionaryCoverHESOpenCount                   "com.apple.iokit.hid.hes.openCount"
+#define kAggregateDictionaryCoverHESCloseCount                  "com.apple.iokit.hid.hes.closeCount"
+#define kAggregateDictionaryCoverHESUsedRecently                "com.apple.iokit.hid.hes.usedRecently"
+#define kAggregateDictionaryCoverHESToggled50ms                 "com.apple.iokit.hid.hes.toggled50ms"
+#define kAggregateDictionaryCoverHESToggled50to100ms            "com.apple.iokit.hid.hes.toggled50to100ms"
+#define kAggregateDictionaryCoverHESToggled100to250ms           "com.apple.iokit.hid.hes.toggled100to250ms"
+#define kAggregateDictionaryCoverHESToggled250to500ms           "com.apple.iokit.hid.hes.toggled250to500ms"
+#define kAggregateDictionaryCoverHESToggled500to1000ms          "com.apple.iokit.hid.hes.toggled500to1000ms"
+#define kAggregateDictionaryCoverHESUnknownStateEnterCount      "com.apple.iokit.hid.hes.unknownStateEnterCount"
+#define kAggregateDictionaryCoverHESUnknownStateExitCount       "com.apple.iokit.hid.hes.unknownStateExitCount"
+
 #define kAppleVendorID 1452
 
 // 072BC077-E984-4C2A-BB72-D4769CE44FAF
 #define kIOHIDEventSystemStatisticsFactory CFUUIDGetConstantUUIDWithBytes(kCFAllocatorSystemDefault, 0x07, 0x2B, 0xC0, 0x77, 0xE9, 0x84, 0x4C, 0x2A, 0xBB, 0x72, 0xD4, 0x76, 0x9C, 0xE4, 0x4F, 0xAF)
 
-#define kStringLength   128
-
 extern "C" void * IOHIDEventSystemStatisticsFactory(CFAllocatorRef allocator, CFUUIDRef typeUUID);
 static mach_timebase_info_data_t    sTimebaseInfo;
-
-static const char kButtonPower[]            = "power/hold";
-static const char kButtonVolumeIncrement[]  = "volume_inc";
-static const char kButtonVolumeDecrement[]  = "volume_dec";
-static const char kButtonMenu[]             = "menu/home";
 
 //------------------------------------------------------------------------------
 // IOHIDEventSystemStatisticsFactory
@@ -128,18 +128,16 @@ _factoryID( static_cast<CFUUIDRef>( CFRetain(factoryID) ) ),
 _refCount(1),
 _displayState(1),
 _displayToken(0),
-_pending_source(0),
 _dispatch_queue(0),
+_pending_source(0),
 _last_motionstat_ts(0),
 _keyServices(NULL),
-_logButtonFiltering(false),
-_logStrings(NULL),
-_logfd(-1),
-_asl(NULL)
+_hesServices(NULL)
 {
     bzero(&_pending_buttons, sizeof(_pending_buttons));
     bzero(&_pending_motionstats, sizeof(_pending_motionstats));
     bzero(&_pending_keystats, sizeof(_pending_keystats));
+    bzero(&_pending_hesstats, sizeof(_pending_hesstats));
     CFPlugInAddInstanceForFactory( factoryID );
 }
 //------------------------------------------------------------------------------
@@ -219,42 +217,26 @@ boolean_t IOHIDEventSystemStatistics::open(void * self, IOHIDSessionRef session,
 
 boolean_t IOHIDEventSystemStatistics::open(IOHIDSessionRef session, IOOptionBits options)
 {
-    CFTypeRef            bootArgs = nil;
-    io_registry_entry_t  entry    = IO_OBJECT_NULL;
-    
     (void)session;
     (void)options;
     
-    entry = IORegistryEntryFromPath(kIOMasterPortDefault, "IODeviceTree:/options");
-    if(entry){
-        bootArgs = IORegistryEntryCreateCFProperty(entry, CFSTR("boot-args"), nil, 0);
-        if (bootArgs){
-            if (CFGetTypeID(bootArgs) == CFStringGetTypeID()){
-                CFRange         findRange;
-                CFStringRef     bootArgsString = (CFStringRef)bootArgs;
-                
-                findRange = CFStringFind(bootArgsString, CFSTR("opposing-button-logging"), 0);
-                
-                if (findRange.length != 0)
-                    _logButtonFiltering = true;
-            }
-            CFRelease(bootArgs);
-            IOObjectRelease(entry);
-        }
-    }
-    
-    if (_logButtonFiltering) {
-        _logStrings = CFArrayCreateMutable(kCFAllocatorDefault, 0, &kCFTypeArrayCallBacks);
-        _asl = asl_open("ButtonLogging", "Button Filtering Information", 0);
-        
-        _logfd = ::open("/var/mobile/Library/Logs/button.log", O_CREAT | O_APPEND | O_RDWR, 0644);
-        
-        if ((_logfd != -1) && (_asl != NULL))
-            asl_add_log_file(_asl, _logfd);
-    }
-    
     _keyServices = CFSetCreateMutable(kCFAllocatorDefault, 0, &kCFTypeSetCallBacks);
+    _hesServices = CFSetCreateMutable(kCFAllocatorDefault, 0, &kCFTypeSetCallBacks);
+    
+    _attachEvent = IOHIDEventCreateKeyboardEvent(kCFAllocatorDefault, 0,
+                                                 kHIDPage_AppleVendorSmartCover,
+                                                 kHIDUsage_AppleVendorSmartCover_Attach,
+                                                 0, 0);
+    
+    if (!_keyServices || !_hesServices || !_attachEvent) {
+        return false;
+    }
+    
+    _awdConnection = std::make_shared<awd::AWDServerConnection>(AWDComponentId_IOHIDFamily);
+    
+    _awdConnection->RegisterQueriableMetricCallbackForIdentifier(AWDComponentId_IOHIDFamily, ^(uint32_t metricId __unused) {
 
+    });
     return true;
 }
 
@@ -271,20 +253,27 @@ void IOHIDEventSystemStatistics::close(IOHIDSessionRef session, IOOptionBits opt
     (void) session;
     (void) options;
     
-    if (_logStrings) {
-        CFRelease(_logStrings);
-        _logStrings = NULL;
-    }
-    
-    if (_asl) {
-        asl_close(_asl);
-        if (_logfd != -1) ::close(_logfd);
+    if (_keyServices) {
+        CFRelease(_keyServices);
+        _keyServices = NULL;
     }
     
     if (_keyServices) {
         CFRelease(_keyServices);
         _keyServices = NULL;
     }
+    
+    if (_hesServices) {
+        CFRelease(_hesServices);
+        _hesServices = NULL;
+    }
+    
+    if (_attachEvent) {
+        CFRelease(_attachEvent);
+        _attachEvent = NULL;
+    }
+    
+    _awdConnection.reset();
 }
 
 //------------------------------------------------------------------------------
@@ -296,6 +285,18 @@ void IOHIDEventSystemStatistics::registerService(void * self, IOHIDServiceRef se
 }
 void IOHIDEventSystemStatistics::registerService(IOHIDServiceRef service)
 {
+    IOHIDEventRef copiedEvent;
+    
+    if ( (copiedEvent = IOHIDServiceCopyEvent(service, kIOHIDEventTypeKeyboard, _attachEvent, 0)) )
+    {
+        CFRelease(copiedEvent);
+        
+        if (_hesServices)
+            CFSetAddValue(_hesServices, service);
+        
+        HIDLogDebug("HES service registered");
+    }
+    
     if ( IOHIDServiceConformsTo(service, kHIDPage_GenericDesktop, kHIDUsage_GD_Keyboard) )
     {
         CFTypeRef   obj;
@@ -331,6 +332,12 @@ void IOHIDEventSystemStatistics::unregisterService(IOHIDServiceRef service)
         CFSetRemoveValue(_keyServices, service);
         
         HIDLogDebug("Apple Keyboard unregistered");
+    }
+    
+    if (_hesServices && CFSetGetValue(_hesServices, service)) {
+        CFSetRemoveValue(_hesServices, service);
+        
+        HIDLogDebug("HES service unregistered");
     }
 }
 
@@ -371,6 +378,7 @@ void IOHIDEventSystemStatistics::unscheduleFromDispatchQueue(dispatch_queue_t qu
         return;
     
     if ( _pending_source ) {
+        dispatch_source_cancel(_pending_source);
         dispatch_release(_pending_source);
         _pending_source = NULL;
     }
@@ -386,10 +394,12 @@ void IOHIDEventSystemStatistics::handlePendingStats(void * self)
 
 void IOHIDEventSystemStatistics::handlePendingStats()
 {
-    __block Buttons     buttons     = {};
-    __block CFArrayRef  logStrings  = NULL;
-    __block MotionStats motionStats = {};
-    __block KeyStats    keyStats    = {};
+    __block Buttons               buttons          = {};
+    __block MotionStats           motionStats      = {};
+    __block KeyStats              keyStats         = {};
+    __block HESStats              hesStats         = {};
+    CFMutableDictionaryRefWrap    adclientKeys     = NULL;
+    
     dispatch_sync(_dispatch_queue, ^{
         bcopy(&_pending_buttons, &buttons, sizeof(Buttons));
         bzero(&_pending_buttons, sizeof(Buttons));
@@ -399,61 +409,48 @@ void IOHIDEventSystemStatistics::handlePendingStats()
         
         bcopy(&_pending_keystats, &keyStats, sizeof(KeyStats));
         bzero(&_pending_keystats, sizeof(KeyStats));
-
-        if (_logStrings) {
-            logStrings = CFArrayCreateCopy(kCFAllocatorDefault, _logStrings);
-            CFArrayRemoveAllValues(_logStrings);
-        }
+        
+        bcopy(&_pending_hesstats, &hesStats, sizeof(HESStats));
+        bzero(&_pending_hesstats, sizeof(HESStats));
     });
     
-    ADClientAddValueForScalarKey(CFSTR(kAggregateDictionaryHomeButtonWakeCountKey), buttons.home_wake);
-    ADClientAddValueForScalarKey(CFSTR(kAggregateDictionaryPowerButtonWakeCountKey), buttons.power_wake);
-    ADClientAddValueForScalarKey(CFSTR(kAggregateDictionaryPowerButtonSleepCountKey), buttons.power_sleep);
-    
-    ADClientAddValueForScalarKey(CFSTR(kAggregateDictionaryPowerButtonPressedCountKey), buttons.power);
-    ADClientAddValueForScalarKey(CFSTR(kAggregateDictionaryPowerButtonFilteredCountKey), buttons.power_filtered);
-    
-    ADClientAddValueForScalarKey(CFSTR(kAggregateDictionaryVolumeIncrementButtonPressedCountKey), buttons.volume_increment);
-    ADClientAddValueForScalarKey(CFSTR(kAggregateDictionaryVolumeIncrementButtonFilteredCountKey), buttons.volume_increment_filtered);
-    
-    ADClientAddValueForScalarKey(CFSTR(kAggregateDictionaryVolumeDecrementButtonPressedCountKey), buttons.volume_decrement);
-    ADClientAddValueForScalarKey(CFSTR(kAggregateDictionaryVolumeDecrementButtonFilteredCountKey), buttons.volume_decrement_filtered);
-    
-    ADClientAddValueForScalarKey(CFSTR(kAggregateDictionaryButtonsHighLatencyCountKey), buttons.high_latency);
+    adclientKeys.SetValueForKey(CFSTR(kAggregateDictionaryHomeButtonWakeCountKey), buttons.home_wake);
+    adclientKeys.SetValueForKey(CFSTR(kAggregateDictionaryPowerButtonWakeCountKey), buttons.power_wake);
+    adclientKeys.SetValueForKey(CFSTR(kAggregateDictionaryPowerButtonSleepCountKey), buttons.power_sleep);
+    adclientKeys.SetValueForKey(CFSTR(kAggregateDictionaryButtonsHighLatencyCountKey), buttons.high_latency);
 
-    ADClientAddValueForScalarKey(CFSTR(kAggregateDictionaryMotionAccelSampleCount), motionStats.accel_count);
-    ADClientAddValueForScalarKey(CFSTR(kAggregateDictionaryMotionGyroSampleCount), motionStats.gyro_count);
-    ADClientAddValueForScalarKey(CFSTR(kAggregateDictionaryMotionMagSampleCount), motionStats.mag_count);
-    ADClientAddValueForScalarKey(CFSTR(kAggregateDictionaryMotionPressureSampleCount), motionStats.pressure_count);
-    ADClientAddValueForScalarKey(CFSTR(kAggregateDictionaryMotionDeviceMotionSampleCount), motionStats.devmotion_count);
+    adclientKeys.SetValueForKey(CFSTR(kAggregateDictionaryMotionAccelSampleCount), motionStats.accel_count);
+    adclientKeys.SetValueForKey(CFSTR(kAggregateDictionaryMotionGyroSampleCount), motionStats.gyro_count);
+    adclientKeys.SetValueForKey(CFSTR(kAggregateDictionaryMotionMagSampleCount), motionStats.mag_count);
+    adclientKeys.SetValueForKey(CFSTR(kAggregateDictionaryMotionPressureSampleCount), motionStats.pressure_count);
+    adclientKeys.SetValueForKey(CFSTR(kAggregateDictionaryMotionDeviceMotionSampleCount), motionStats.devmotion_count);
     
     HIDLogDebug("Apple Keyboard char: %d symbol: %d spacebar: %d arrow: %d cursor: %d modifier: %d ",
                 keyStats.character_count, keyStats.symbol_count, keyStats.spacebar_count,
                 keyStats.arrow_count, keyStats.cursor_count, keyStats.modifier_count);
     
-    ADClientAddValueForScalarKey(CFSTR(kAggregateDictionaryAppleKeyboardCharacterCountKey), keyStats.character_count);
-    ADClientAddValueForScalarKey(CFSTR(kAggregateDictionaryAppleKeyboardSymbolCountKey), keyStats.symbol_count);
-    ADClientAddValueForScalarKey(CFSTR(kAggregateDictionaryAppleKeyboardSpacebarCountKey), keyStats.spacebar_count);
-    ADClientAddValueForScalarKey(CFSTR(kAggregateDictionaryAppleKeyboardArrowCountKey), keyStats.arrow_count);
-    ADClientAddValueForScalarKey(CFSTR(kAggregateDictionaryAppleKeyboardCursorCountKey), keyStats.cursor_count);
-    ADClientAddValueForScalarKey(CFSTR(kAggregateDictionaryAppleKeyboardModifierCountKey), keyStats.modifier_count);
-
-    if (logStrings) {
-        for (int i = 0; i < CFArrayGetCount(logStrings); i++) {
-            CFStringRef cfstr;
-            const char * cstr;
-            
-            cfstr = (CFStringRef) CFArrayGetValueAtIndex(logStrings, i);
-            if (!cfstr) continue;
-            
-            cstr = CFStringGetCStringPtr(cfstr, kCFStringEncodingUTF8);
-            if (!cstr) continue;
-            
-            asl_log(_asl, NULL, ASL_LEVEL_NOTICE, "%s", cstr);
-        }
+    adclientKeys.SetValueForKey(CFSTR(kAggregateDictionaryAppleKeyboardCharacterCountKey), keyStats.character_count);
+    adclientKeys.SetValueForKey(CFSTR(kAggregateDictionaryAppleKeyboardSymbolCountKey), keyStats.symbol_count);
+    adclientKeys.SetValueForKey(CFSTR(kAggregateDictionaryAppleKeyboardSpacebarCountKey), keyStats.spacebar_count);
+    adclientKeys.SetValueForKey(CFSTR(kAggregateDictionaryAppleKeyboardArrowCountKey), keyStats.arrow_count);
+    adclientKeys.SetValueForKey(CFSTR(kAggregateDictionaryAppleKeyboardCursorCountKey), keyStats.cursor_count);
+    adclientKeys.SetValueForKey(CFSTR(kAggregateDictionaryAppleKeyboardModifierCountKey), keyStats.modifier_count);
     
-        CFRelease(logStrings);
-    }
+    HIDLogDebug("Cover HES open: %d close: %d <50ms: %d 50-100ms: %d 100-250ms: %d 250-500ms: %d 500-1000ms: %d",
+                hesStats.open_count, hesStats.close_count, hesStats.toggled_50ms,
+                hesStats.toggled_50_100ms, hesStats.toggled_100_250ms, hesStats.toggled_250_500ms, hesStats.toggled_500_1000ms);
+    
+    adclientKeys.SetValueForKey(CFSTR(kAggregateDictionaryCoverHESOpenCount), hesStats.open_count);
+    adclientKeys.SetValueForKey(CFSTR(kAggregateDictionaryCoverHESCloseCount), hesStats.close_count);
+    adclientKeys.SetValueForKey(CFSTR(kAggregateDictionaryCoverHESToggled50ms), hesStats.toggled_50ms);
+    adclientKeys.SetValueForKey(CFSTR(kAggregateDictionaryCoverHESToggled50to100ms), hesStats.toggled_50_100ms);
+    adclientKeys.SetValueForKey(CFSTR(kAggregateDictionaryCoverHESToggled100to250ms), hesStats.toggled_100_250ms);
+    adclientKeys.SetValueForKey(CFSTR(kAggregateDictionaryCoverHESToggled250to500ms), hesStats.toggled_250_500ms);
+    adclientKeys.SetValueForKey(CFSTR(kAggregateDictionaryCoverHESToggled500to1000ms), hesStats.toggled_500_1000ms);
+    adclientKeys.SetValueForKey(CFSTR(kAggregateDictionaryCoverHESUnknownStateEnterCount), hesStats.unknownStateEnter);
+    adclientKeys.SetValueForKey(CFSTR(kAggregateDictionaryCoverHESUnknownStateExitCount), hesStats.unknownStateExit);
+    
+    ADClientBatchKeys(adclientKeys.Reference(), NULL);
 }
 
 //------------------------------------------------------------------------------
@@ -461,20 +458,19 @@ void IOHIDEventSystemStatistics::handlePendingStats()
 //------------------------------------------------------------------------------
 bool IOHIDEventSystemStatistics::collectKeyStats(IOHIDServiceRef sender, IOHIDEventRef event)
 {
-    bool        serviceMatch = false;
     uint16_t    usagePage;
     uint16_t    usage;
     
     if (sender == NULL || _keyServices == NULL)
         return false;
-    
-    // Check if the event is from a registered Apple Keyboard service.
-    if (!CFSetGetValue(_keyServices, sender))
-        return false;
-    
+
     // Collect stats only for keyboard event key-downs.
     if (IOHIDEventGetType(event) != kIOHIDEventTypeKeyboard ||
         !IOHIDEventGetIntegerValue(event, kIOHIDEventFieldKeyboardDown))
+        return false;
+    
+    // Check if the event is from a registered Apple Keyboard service.
+    if (!CFSetGetValue(_keyServices, sender))
         return false;
         
     usagePage = IOHIDEventGetIntegerValue(event, kIOHIDEventFieldKeyboardUsagePage);
@@ -510,9 +506,106 @@ bool IOHIDEventSystemStatistics::collectKeyStats(IOHIDServiceRef sender, IOHIDEv
 }
 
 //------------------------------------------------------------------------------
+// IOHIDEventSystemStatistics::collectHESStats
+//------------------------------------------------------------------------------
+bool IOHIDEventSystemStatistics::collectHESStats(IOHIDServiceRef sender, IOHIDEventRef event)
+{
+    uint16_t            usagePage;
+    uint16_t            usage;
+    bool                down;
+    uint64_t            ts;
+    static uint64_t     lastOpenTS = 0;
+    bool    result      =  false;
+    
+    if (sender == NULL || _hesServices == NULL)
+        return result;
+    
+    // Collect stats only for keyboard events.
+    if (IOHIDEventGetType(event) != kIOHIDEventTypeKeyboard) {
+        return result;
+    }
+    
+    // Check if the event is from a registered HES service.
+    if (!CFSetGetValue(_hesServices, sender)) {
+        return result;
+    }
+    
+    usagePage = IOHIDEventGetIntegerValue(event, kIOHIDEventFieldKeyboardUsagePage);
+    usage     = IOHIDEventGetIntegerValue(event, kIOHIDEventFieldKeyboardUsage);
+    down      = (IOHIDEventGetIntegerValue(event, kIOHIDEventFieldKeyboardDown) == 1);
+    ts        = IOHIDEventGetTimeStamp(event);
+    
+    if (usagePage != kHIDPage_AppleVendorSmartCover) {
+        return result;
+    }
+
+    awdmetrics::IOHIDFamilyCoverHESTEvents  metric;
+    
+    if (usage == kHIDUsage_AppleVendorSmartCover_Open) {
+        result = true;
+        if (!down) {
+            HIDLogDebug("Cover HES open");
+            _pending_hesstats.open_count++;
+             metric.openCount (_pending_hesstats.open_count);
+            lastOpenTS = ts;
+        } else {
+            HIDLogDebug("Cover HES close");
+            _pending_hesstats.close_count++;
+            metric.closeCount(_pending_hesstats.close_count);
+            // Compute MS since last cover open.
+            if (ts >= lastOpenTS) {
+                uint64_t elapsedMS = _IOHIDGetTimestampDelta(ts, lastOpenTS, kMillisecondScale);
+                
+                if (elapsedMS < 50) {
+                    HIDLogDebug("Cover HES toggle <50ms: %llu", elapsedMS);
+                    _pending_hesstats.toggled_50ms++;
+                    metric.toggled50ms (_pending_hesstats.toggled_50ms);
+                }
+                else if (elapsedMS < 100) {
+                    HIDLogDebug("Cover HES toggle 50 to 100ms: %llu", elapsedMS);
+                    _pending_hesstats.toggled_50_100ms++;
+                    metric.toggled50100ms (_pending_hesstats.toggled_50_100ms);
+                }
+                else if (elapsedMS < 250) {
+                    HIDLogDebug("Cover HES toggle 100 to 250ms: %llu", elapsedMS);
+                    _pending_hesstats.toggled_100_250ms++;
+                    metric.toggled100250ms (_pending_hesstats.toggled_100_250ms);
+
+                }
+                else if (elapsedMS < 500) {
+                    HIDLogDebug("Cover HES toggle 250 to 500ms: %llu", elapsedMS);
+                    _pending_hesstats.toggled_250_500ms++;
+                     metric.toggled250500ms (_pending_hesstats.toggled_250_500ms);
+                }
+                else if (elapsedMS < 1000) {
+                    HIDLogDebug("Cover HES toggle 500 to 1000ms: %llu", elapsedMS);
+                    _pending_hesstats.toggled_500_1000ms++;
+                    metric.toggled5001000ms(_pending_hesstats.toggled_500_1000ms);
+                }
+            }
+        }
+        AWDPostMetric (AWDMetricId_IOHIDFamily_CoverHESTEvents, metric);
+    } else if ( usage == kHIDUsage_AppleVendorSmartCover_StateUnknown) {
+        result = true;
+        if (down) {
+            HIDLogDebug("Cover HES unknown state enter");
+            _pending_hesstats.unknownStateEnter++;
+            metric.unknownStateEnter(_pending_hesstats.unknownStateEnter);
+        } else {
+            HIDLogDebug("Cover HES unknown state exit");
+            _pending_hesstats.unknownStateExit++;
+            metric.unknownStateExit(_pending_hesstats.unknownStateExit);
+        }
+        AWDPostMetric (AWDMetricId_IOHIDFamily_CoverHESTEvents, metric);
+    }
+    // Return true to signal AggD update.
+    return result;
+}
+
+//------------------------------------------------------------------------------
 // IOHIDEventSystemStatistics::collectMotionStats
 //------------------------------------------------------------------------------
-bool IOHIDEventSystemStatistics::collectMotionStats(IOHIDServiceRef sender, IOHIDEventRef event)
+bool IOHIDEventSystemStatistics::collectMotionStats(IOHIDServiceRef sender __unused, IOHIDEventRef event)
 {
     // Synchronize writing to motionstats on the session queue
     switch (IOHIDEventGetType(event)) {
@@ -563,17 +656,17 @@ IOHIDEventRef IOHIDEventSystemStatistics::filter(void * self, IOHIDServiceRef se
 }
 IOHIDEventRef IOHIDEventSystemStatistics::filter(IOHIDServiceRef sender, IOHIDEventRef event)
 {
-    const char *    button;
-    uint64_t        ts;
-    float           secs;
-    
     (void) sender;
     
     if ( _pending_source ) {
         if ( event ) {
             bool signal = false;
             
-            if (collectKeyStats(sender, event)) {
+            if (collectHESStats(sender, event)) {
+                
+                signal = true;
+            }
+            else if (collectKeyStats(sender, event)) {
                 
                 signal = true;
             }
@@ -602,107 +695,22 @@ IOHIDEventRef IOHIDEventSystemStatistics::filter(IOHIDServiceRef sender, IOHIDEv
                     
                     switch (IOHIDEventGetIntegerValue(event, kIOHIDEventFieldKeyboardUsage) ) {
                         case kHIDUsage_Csmr_Menu:
-                            button = kButtonMenu;
                             if ( !_displayState )
                                 _pending_buttons.home_wake++;
                             break;
                         case kHIDUsage_Csmr_Power:
-                            _pending_buttons.power++;
-                            button = kButtonPower;
                             if ( !_displayState )
                                 _pending_buttons.power_wake++;
                             else
                                 _pending_buttons.power_sleep++;
-                            break;
-                        case kHIDUsage_Csmr_VolumeDecrement:
-                            _pending_buttons.volume_decrement++;
-                            button = kButtonVolumeDecrement;
-                            break;
-                        case kHIDUsage_Csmr_VolumeIncrement:
-                            _pending_buttons.volume_increment++;
-                            button = kButtonVolumeIncrement;
                             break;
                         default:
                             signal = false;
                             break;
                     }
                 }
-                
-                if (signal && _logButtonFiltering) {
-                    if ( sTimebaseInfo.denom == 0 ) {
-                        (void) mach_timebase_info(&sTimebaseInfo);
-                    }
-                    ts = IOHIDEventGetTimeStamp(event);
-                    ts = ts * sTimebaseInfo.numer / sTimebaseInfo.denom;
-                    secs = (float)ts / NSEC_PER_SEC;
-                    
-                    CFStringRef str = CFStringCreateWithFormat(kCFAllocatorDefault,
-                                                               0,
-                                                               CFSTR("ts=%0.9f,action=down,button=%s"),
-                                                               secs,
-                                                               button ? button : "unknown");
-                    
-                    if (str) {
-                        CFArrayAppendValue(_logStrings, str);
-                        CFRelease(str);
-                    }
-                }
             }
-            else if ((IOHIDEventGetType(event) == kIOHIDEventTypeVendorDefined)
-                     && (IOHIDEventGetIntegerValue(event, kIOHIDEventFieldVendorDefinedUsagePage) == kHIDPage_AppleVendorFilteredEvent)
-                     && (IOHIDEventGetIntegerValue(event, kIOHIDEventFieldVendorDefinedUsage) == kIOHIDEventTypeKeyboard)) {
-                
-                CFIndex dataLength = IOHIDEventGetIntegerValue(event, kIOHIDEventFieldVendorDefinedDataLength);
-                if ( dataLength >= sizeof(IOHIDKeyboardEventData)) {
-                    IOHIDKeyboardEventData * data = (IOHIDKeyboardEventData*)IOHIDEventGetDataValue(event, kIOHIDEventFieldVendorDefinedData);
-                    
-                    if ( data->usagePage == kHIDPage_Consumer && data->down ) {
-                        
-                        signal = true;
-                        
-                        switch ( data->usage ) {
-                            case kHIDUsage_Csmr_Power:
-                                _pending_buttons.power_filtered++;
-                                button = kButtonPower;
-                                break;
-                            case kHIDUsage_Csmr_VolumeDecrement:
-                                _pending_buttons.volume_decrement_filtered++;
-                                button = kButtonVolumeDecrement;
-                                break;
-                            case kHIDUsage_Csmr_VolumeIncrement:
-                                _pending_buttons.volume_increment_filtered++;
-                                button = kButtonVolumeIncrement;
-                                break;
-                            default:
-                                signal = false;
-                                break;
-                        }
-                    }
-                    
-                    if (signal && _logButtonFiltering) {
-                        if ( sTimebaseInfo.denom == 0 ) {
-                            (void) mach_timebase_info(&sTimebaseInfo);
-                        }
-                        
-                        ts = IOHIDEventGetTimeStamp(event);
-                        ts = ts * sTimebaseInfo.numer / sTimebaseInfo.denom;
-                        secs = (float)ts / NSEC_PER_SEC;
-                        
-                        CFStringRef str = CFStringCreateWithFormat(kCFAllocatorDefault,
-                                                                   0,
-                                                                   CFStringCreateWithCString(kCFAllocatorDefault,
-                                                                                             "ts=%0.9f,action=filtered,button=%s",
-                                                                                             kCFStringEncodingUTF8) ,
-                                                                   secs,
-                                                                   button ? button : "unknown");
-                        
-                        if (str) {
-                            CFArrayAppendValue(_logStrings, str);
-                            CFRelease(str);
-                        }
-                    }
-                }
-            } else {
+            else {
                 signal = collectMotionStats(sender, event);
             }
 

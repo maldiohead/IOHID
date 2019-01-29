@@ -12,6 +12,7 @@
 #include <IOKit/hid/IOHIDService.h>
 #include "IOHIDKeyboardEventTranslation.h"
 #include <IOKit/hid/IOHIDUsageTables.h>
+#include <IOKit/hid/IOHIDPrivateKeys.h>
 #include "AppleHIDUsageTables.h"
 #include "IOHIDFamilyPrivate.h"
 #include <IOKit/usb/USB.h>
@@ -91,14 +92,6 @@ typedef struct  __IOHIDKeyboardEventTranslator {
   uint32_t          eventFlags;
   boolean_t         isISO;
 } __IOHIDKeyboardEventTranslator;
-
-#define KeyboardStickyKeyFlags    ( \
-    kIOHIDKeyboardStickyKeyDown   | \
-    kIOHIDKeyboardStickyKeyLocked | \
-    kIOHIDKeyboardStickyKeyUp     | \
-    kIOHIDKeyboardStickyKeysOn    | \
-    kIOHIDKeyboardStickyKeysOff   )
-
 
 #define kNXFlagsModifierMask (NX_COMMANDMASK|NX_ALTERNATEMASK|NX_CONTROLMASK|NX_SHIFTMASK|NX_SECONDARYFNMASK)
 
@@ -317,6 +310,13 @@ const MODIFIER_INFO ModifierInfoTable [] = {
     },
     {
         kHIDPage_AppleVendorTopCase, kHIDUsage_AV_TopCase_KeyboardFn,
+        NX_SECONDARYFNMASK,
+        NX_SUBTYPE_STICKYKEYS_FN_UP,
+        NX_SUBTYPE_STICKYKEYS_FN_DOWN,
+        NX_SUBTYPE_STICKYKEYS_FN_LOCK,
+    },
+    {
+        kHIDPage_AppleVendorKeyboard, kHIDUsage_AppleVendorKeyboard_Function,
         NX_SECONDARYFNMASK,
         NX_SUBTYPE_STICKYKEYS_FN_UP,
         NX_SUBTYPE_STICKYKEYS_FN_DOWN,
@@ -542,25 +542,43 @@ void __IOHIDKeyboardEventTranslatorInitNxEvent (EVENT_TRANSLATOR_CONTEXT *contex
 //++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++
 void __IOHIDKeyboardEventTranslatorAddStickyKeyEvent (IOHIDKeyboardEventTranslatorRef translator, EVENT_TRANSLATOR_CONTEXT *context)
 {
-
-  uint16_t    subType = 0;
-  
-  if (context->flags & kIOHIDKeyboardStickyKeyUp) {
-    subType = context->modifier->stickyUpType;
-  } else if (context->flags & kIOHIDKeyboardStickyKeyDown) {
-    subType = context->modifier->stickyDownType;
-  } else if (context->flags & kIOHIDKeyboardStickyKeyLocked) {
-    subType = context->modifier->stickyLockType;
-  } else if (context->flags & kIOHIDKeyboardStickyKeysOn) {
-    subType = NX_SUBTYPE_STICKYKEYS_ON;
-  } else if (context->flags & kIOHIDKeyboardStickyKeysOff) {
-    subType = NX_SUBTYPE_STICKYKEYS_OFF;
-  } else {
-    return ;
-  }
-  
-  __IOHIDKeyboardEventTranslatorAddSysdefinedEventWithSubtype (translator, context, subType);
+    uint16_t    subType = 0;
     
+    if (context->modifier) {
+        switch (IOHIDEventGetIntegerValue(context->event, kIOHIDEventFieldKeyboardStickyKeyPhase)) {
+            case kIOHIDKeyboardStickyKeyPhaseUp:
+                subType = context->modifier->stickyUpType;
+                break;
+            case kIOHIDKeyboardStickyKeyPhaseDown:
+                subType = context->modifier->stickyDownType;
+                break;
+            case kIOHIDKeyboardStickyKeyPhaseLocked:
+                subType = context->modifier->stickyLockType;
+                break;
+            default:
+                break;
+        }
+    }
+    
+    if (subType) {
+        __IOHIDKeyboardEventTranslatorAddSysdefinedEventWithSubtype (translator, context, subType);
+        return;
+    }
+    
+    switch (IOHIDEventGetIntegerValue(context->event, kIOHIDEventFieldKeyboardStickyKeyToggle)) {
+        case kIOHIDKeyboardStickyKeyToggleOn:
+            subType = NX_SUBTYPE_STICKYKEYS_ON;
+            break;
+        case kIOHIDKeyboardStickyKeyToggleOff:
+            subType = NX_SUBTYPE_STICKYKEYS_OFF;
+            break;
+        default:
+            break;
+    }
+    
+    if (subType) {
+        __IOHIDKeyboardEventTranslatorAddSysdefinedEventWithSubtype (translator, context, subType);
+    }
 }
 
 //++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++
@@ -820,7 +838,7 @@ CFArrayRef IOHIDKeyboardEventTranslatorCreateEventCollection(IOHIDKeyboardEventT
   __IOHIDKeyboardEventProcessModifiers (translator, &context);
   
   do {
-    if (context.flags & KeyboardStickyKeyFlags) {
+    if (IOHIDEventGetIntegerValue(kbcEvent, kIOHIDEventFieldKeyboardStickyKeyPhase) || IOHIDEventGetIntegerValue(kbcEvent, kIOHIDEventFieldKeyboardStickyKeyToggle)) {
       __IOHIDKeyboardEventTranslatorAddStickyKeyEvent (translator, &context);
     } else if (slowKeyPhase == kIOHIDKeyboardSlowKeyPhaseStart || slowKeyPhase == kIOHIDKeyboardSlowKeyPhaseAbort) {
       __IOHIDKeyboardEventTranslatorAddSlowKeyPhaseEvent (translator, &context);

@@ -25,320 +25,109 @@
 #include <IOKit/IOLib.h>
 #include <IOKit/IODataQueueShared.h>
 #include "IOHIDEventQueue.h"
-
-enum {
-    kHIDQueueStarted    = 0x01,
-    kHIDQueueDisabled   = 0x02
-};
     
 #define super IOSharedDataQueue
-OSDefineMetaClassAndStructors( IOHIDEventQueue, super )
+OSDefineMetaClassAndStructors(IOHIDEventQueue, super)
 
-//---------------------------------------------------------------------------
-// Factory methods.
-
-IOHIDEventQueue * IOHIDEventQueue::withCapacity( UInt32 size )
+IOHIDEventQueue *IOHIDEventQueue::withCapacity(UInt32 size)
 {
-    IOHIDEventQueue * queue = new IOHIDEventQueue;
+    IOHIDEventQueue *queue = new IOHIDEventQueue;
     
-    if ( queue && !queue->initWithCapacity(size) )
-    {
+    if (queue && !queue->initWithCapacity(size)) {
         queue->release();
         queue = 0;
-        goto exit;
     }
-
-    queue->_state               = 0;
-    queue->_lock                = IOLockAlloc();
-    queue->_numEntries          = size / DEFAULT_HID_ENTRY_SIZE;
-    queue->_currentEntrySize    = DEFAULT_HID_ENTRY_SIZE;
-    queue->_maxEntrySize        = DEFAULT_HID_ENTRY_SIZE;
-   
-exit: 
+    
     return queue;
 }
 
-IOHIDEventQueue * IOHIDEventQueue::withEntries( UInt32 numEntries,
-                                                UInt32 entrySize )
+IOHIDEventQueue *IOHIDEventQueue::withEntries(UInt32 numEntries, UInt32 entrySize)
 {
-    IOHIDEventQueue * queue = NULL;
-    UInt32 size = numEntries*entrySize;
+    IOHIDEventQueue *queue = NULL;
+    UInt32 size = numEntries * entrySize;
     
-    if ( numEntries > UINT32_MAX / entrySize )
+    if (numEntries > UINT32_MAX / entrySize) {
         return NULL;
+    }
 
-    if ( size < MIN_HID_QUEUE_CAPACITY )
-        size = MIN_HID_QUEUE_CAPACITY;
+    if (size < HID_QUEUE_CAPACITY_MIN) {
+        size = HID_QUEUE_CAPACITY_MIN;
+    }
     
+    if (size > HID_QUEUE_CAPACITY_MAX_ENTITLED) {
+        size = HID_QUEUE_CAPACITY_MAX_ENTITLED;
+    }
     
     queue = IOHIDEventQueue::withCapacity(size);
-    if (queue )
+    if (queue) {
         queue->_numEntries = numEntries;
+        queue->_entrySize = entrySize;
+    }
     
     return queue;
 }
 
-void IOHIDEventQueue::free()
-{
-    if (_lock)
-    {
-        IOLockLock(_lock);
-        IOLock*	 tempLock = _lock;
-        _lock = NULL;
-        IOLockUnlock(tempLock);
-        IOLockFree(tempLock);
-    }
-    
-    if ( _descriptor )
-    {
-        _descriptor->release();
-        _descriptor = 0;
-    }
-
-    super::free();
-}
-
-Boolean IOHIDEventQueue::initWithEntries(UInt32 numEntries, UInt32 entrySize)
-{
-    UInt32 size = numEntries*entrySize;
-    
-    if ( numEntries > UINT32_MAX / entrySize )
-        return false;
-
-    if ( size < MIN_HID_QUEUE_CAPACITY )
-        size = MIN_HID_QUEUE_CAPACITY;
-        
-    return super::initWithCapacity(size);
-}
-
-//---------------------------------------------------------------------------
-// Add data to the queue.
-
-Boolean IOHIDEventQueue::enqueue( void * data, UInt32 dataSize )
+Boolean IOHIDEventQueue::enqueue(void *data, UInt32 dataSize)
 {
     Boolean ret = true;
     
-    if ( _lock )
-        IOLockLock(_lock);
-
     // if we are not started, then dont enqueue
     // for now, return true, since we dont wish to push an error back
-    if ((_state & (kHIDQueueStarted | kHIDQueueDisabled)) == kHIDQueueStarted)
+    if ((_state & (kHIDQueueStarted | kHIDQueueDisabled)) == kHIDQueueStarted) {
         ret = super::enqueue(data, dataSize);
-
-    if ( _lock )
-        IOLockUnlock(_lock);
-
+        if (!ret) {
+            _enqueueErrorCount++;
+            //Send notification for queue full
+            sendDataAvailableNotification();
+        }
+    }
+    
     return ret;
 }
 
-
-//---------------------------------------------------------------------------
-// Start the queue.
-
-void IOHIDEventQueue::start() 
+bool IOHIDEventQueue::serialize(OSSerialize * serializer) const
 {
-    if ( _lock )
-        IOLockLock(_lock);
-
-    if ( _state & kHIDQueueStarted )
-        goto START_END;
-
-    if ( _currentEntrySize != _maxEntrySize )
-    {
-        mach_port_t port = notifyMsg ? ((mach_msg_header_t *)notifyMsg)->msgh_remote_port : MACH_PORT_NULL;
-        
-        // Free the existing queue data
-        if (dataQueue) {
-            IOFreeAligned(dataQueue, round_page_32(getQueueSize() + DATA_QUEUE_MEMORY_HEADER_SIZE));
-            dataQueue = NULL;
-        }
-        
-        if (_descriptor) {
-            _descriptor->release();
-            _descriptor = 0;
-        }
-        
-        // init the queue again.  This will allocate the appropriate data.
-        if ( !initWithEntries(_numEntries, _maxEntrySize) ) {
-            goto START_END;
-        }
-        
-        _currentEntrySize = _maxEntrySize;
-        
-        // RY: since we are initing the queue, we should reset the port as well
-        if ( port ) 
-            setNotificationPort(port);
-    }
-    else if ( dataQueue )
-    {
-        dataQueue->head = 0;
-        dataQueue->tail = 0;
-    }
-
-    _state |= kHIDQueueStarted;
-
-START_END:
-    if ( _lock )
-        IOLockUnlock(_lock);
-
-}
-
-void IOHIDEventQueue::stop()
-{
-    if ( _lock )
-        IOLockLock(_lock);
-
-    _state &= ~kHIDQueueStarted;
-
-    if ( _lock )
-        IOLockUnlock(_lock);
-}
-
-void IOHIDEventQueue::enable() 
-{
-    if ( _lock )
-        IOLockLock(_lock);
-
-    _state &= ~kHIDQueueDisabled;
-
-    if ( _lock )
-        IOLockUnlock(_lock);
-}
-
-void IOHIDEventQueue::disable()
-{
-    if ( _lock )
-        IOLockLock(_lock);
-
-    _state |= kHIDQueueDisabled;
-
-    if ( _lock )
-        IOLockUnlock(_lock);
-}
-
-Boolean IOHIDEventQueue::isStarted()
-{
-    bool ret;
+    bool ret = false;
     
-    if ( _lock )
-        IOLockLock(_lock);
-
-    ret = (_state & kHIDQueueStarted) != 0;
-
-    if ( _lock )
-        IOLockUnlock(_lock);
-        
+    if (serializer->previouslySerialized(this)) {
+        return true;
+    }
+    
+    OSDictionary *dict = OSDictionary::withCapacity(2);
+    if (dict) {
+        OSNumber *num = OSNumber::withNumber(dataQueue->head, 32);
+        if (num) {
+            dict->setObject("head", num);
+            num->release();
+        }
+        num = OSNumber::withNumber(dataQueue->tail, 32);
+        if (num) {
+            dict->setObject("tail", num);
+            num->release();
+        }
+        num = OSNumber::withNumber(_enqueueErrorCount, 64);
+        if (num) {
+            dict->setObject("EnqueueErrorCount", num);
+            num->release();
+        }
+        num = OSNumber::withNumber(_reserved->queueSize, 64);
+        if (num) {
+            dict->setObject("QueueSize", num);
+            num->release();
+        }
+        num = OSNumber::withNumber(_numEntries, 64);
+        if (num) {
+            dict->setObject("numEntries", num);
+            num->release();
+        }
+        num = OSNumber::withNumber(_entrySize, 64);
+        if (num) {
+            dict->setObject("entrySize", num);
+            num->release();
+        }
+        ret = dict->serialize(serializer);
+        dict->release();
+    }
+    
     return ret;
 }
-
-void IOHIDEventQueue::setOptions(IOHIDQueueOptionsType flags) 
-{
-    if ( _lock )
-        IOLockLock(_lock);
-
-	_options = flags;
-
-    if ( _lock )
-        IOLockUnlock(_lock);
-}
-
-IOHIDQueueOptionsType IOHIDEventQueue::getOptions() 
-{ 
-	return _options;
-}
-
-//---------------------------------------------------------------------------
-// Add element to the queue.
-
-void IOHIDEventQueue::addElement( IOHIDElementPrivate * element )
-{
-    UInt32 elementSize;
-    
-    if ( !element )
-        return;
-        
-    if ( !_elementSet )
-    {
-        _elementSet = OSSet::withCapacity(4);
-    }
-    
-    if ( _elementSet->containsObject( element ) )
-        return;
-        
-    elementSize = element->getElementValueSize() + sizeof(void *);
-    
-    if ( _maxEntrySize < elementSize )
-        _maxEntrySize = elementSize;
-}
-
-//---------------------------------------------------------------------------
-// Remove element from the queue.
-
-void IOHIDEventQueue::removeElement( IOHIDElementPrivate * element )
-{
-    OSCollectionIterator *      iterator;
-    IOHIDElementPrivate *       temp;
-    UInt32                      size        = 0;
-    UInt32                      maxSize     = DEFAULT_HID_ENTRY_SIZE;
-    
-    if ( !element || !_elementSet || !_elementSet->containsObject( element ))
-        return;
-        
-    _elementSet->removeObject( element );
-    
-    if ( NULL != (iterator = OSCollectionIterator::withCollection(_elementSet)) )
-    {
-        while ( NULL != (temp = (IOHIDElementPrivate *)iterator->getNextObject()) )
-        {
-            size = temp->getElementValueSize() + sizeof(void *);
-            
-            if ( maxSize < size )
-                maxSize = size;   
-        }
-    
-        iterator->release();
-    }
-        
-    _maxEntrySize = maxSize;
-}
-
-//---------------------------------------------------------------------------
-// get entry size from the queue.
-
-UInt32 IOHIDEventQueue::getEntrySize( )
-{
-    return _maxEntrySize;
-}
-
-
-//---------------------------------------------------------------------------
-// get a mem descriptor.  replacing default behavior
-
-IOMemoryDescriptor * IOHIDEventQueue::getMemoryDescriptor()
-{
-    if (!_descriptor)
-        _descriptor = super::getMemoryDescriptor();
-
-    return _descriptor;
-}
-
-//---------------------------------------------------------------------------
-// 
-
-OSMetaClassDefineReservedUnused(IOHIDEventQueue,  0);
-OSMetaClassDefineReservedUnused(IOHIDEventQueue,  1);
-OSMetaClassDefineReservedUnused(IOHIDEventQueue,  2);
-OSMetaClassDefineReservedUnused(IOHIDEventQueue,  3);
-OSMetaClassDefineReservedUnused(IOHIDEventQueue,  4);
-OSMetaClassDefineReservedUnused(IOHIDEventQueue,  5);
-OSMetaClassDefineReservedUnused(IOHIDEventQueue,  6);
-OSMetaClassDefineReservedUnused(IOHIDEventQueue,  7);
-OSMetaClassDefineReservedUnused(IOHIDEventQueue,  8);
-OSMetaClassDefineReservedUnused(IOHIDEventQueue,  9);
-OSMetaClassDefineReservedUnused(IOHIDEventQueue, 10);
-OSMetaClassDefineReservedUnused(IOHIDEventQueue, 11);
-OSMetaClassDefineReservedUnused(IOHIDEventQueue, 12);
-OSMetaClassDefineReservedUnused(IOHIDEventQueue, 13);
-OSMetaClassDefineReservedUnused(IOHIDEventQueue, 14);
-OSMetaClassDefineReservedUnused(IOHIDEventQueue, 15);

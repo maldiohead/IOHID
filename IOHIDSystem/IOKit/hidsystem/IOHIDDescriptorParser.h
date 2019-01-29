@@ -23,29 +23,45 @@
 #ifndef __IOHIDDescriptorParser__
 #define __IOHIDDescriptorParser__
 
+#if RTKIT
+#include <stdio.h>
+#include <stdint.h>
+#include <stdbool.h>
+
+typedef uint8_t     UInt8;
+typedef int8_t      Int8;
+typedef uint32_t    UInt32;
+typedef int32_t     SInt32;
+typedef uint32_t    IOByteCount;
+typedef bool        Boolean;
+typedef SInt32      OSStatus;
+typedef size_t      vm_size_t;
+
+#else
+
 #include <TargetConditionals.h>
 #include <IOKit/IOTypes.h>
-#include <IOKit/hidsystem/IOHIDUsageTables.h>
+
+#if __has_include(<MacTypes.h>)
+    #include <MacTypes.h>
+#endif
+
+#endif
+
 
 #ifdef __cplusplus
 extern "C" {
 #endif
 
-#if TARGET_OS_EMBEDDED
-/* Types and enums required by these functions but not in IOTypes.h */
-
-typedef UInt8		Byte;
-typedef SInt8		SignedByte;
-typedef unsigned long	FourCharCode;
-typedef FourCharCode	OSType;
-
-enum {
-	noErr	= 0
-};
-#endif
-
 /* End missing types and enums */
 
+
+    
+#if __has_include(<MacErrors.h>)
+    #include <MacErrors.h>
+#elif __has_include(<CoreServices/../Frameworks/CarbonCore.framework/Headers/MacErrors.h>)
+    #include <CoreServices/../Frameworks/CarbonCore.framework/Headers/MacErrors.h>
+#else
 enum
 {
 	kHIDSuccess						= 0,
@@ -88,7 +104,7 @@ enum
 	kHIDDeviceNotReady 		= -13910, 		// The device is still initializing, try again later
 	kHIDVersionIncompatibleErr,
 };
-
+#endif
 // types of HID reports (input, output, feature)
 enum
 {
@@ -386,7 +402,6 @@ HIDOpenReportDescriptor	   (void *					hidReportDescriptor,
 /*!
   @function HIDCloseReportDescriptor
   @abstract Disposes of the memory the parser allocated for the HIDOpenReportDescriptor function.
-  @param hidReportDescriptor Contains a pointer to the actual HID report descriptor from the USB device's firmware
   @param preparsedDataRef Preparsed data reference for the report that is returned by the HIDOpenReportDescriptor function.  After making a call to the HIDCloseReportDescriptor function, the preparsedDataRef is invalid and should not be used.
   @result OSStatus Returns an error code if an error was encountered or noErr on success.
  */
@@ -506,7 +521,7 @@ HIDGetScaledUsageValue	   (HIDReportType			reportType,
   @param collection Specifies a link collection identifier to use as a search criteria.  If this parameter is non-zero, then only buttons that are part of the specified link collection are retrieved.
   @param usage Specifies a usage identifier to use as a search criteria.  If this parameter is non-zero, then only buttons that match the value specified are retrieved.
   @param buttonCaps Points to a caller-allocated buffer that will contain, on return, an array of HIDButtonCaps structures.  The structures contain information for all buttons that meet the search criteria.
-  @param buttonCapsLength On input, specifies the length, in array elements, of the buffer provided in the buttonCaps parameter.  On output, this parameter is set to the actual number of elements that were returned by the function call, in the buffer provided in the buttonCaps parameter, if the routine completed without error.  The correct length necessary to retrieve the button capabilities can be found in the capability data returned for the device by the HIDGetCaps function.
+  @param buttonCapsSize On input, specifies the length, in array elements, of the buffer provided in the buttonCaps parameter.  On output, this parameter is set to the actual number of elements that were returned by the function call, in the buffer provided in the buttonCaps parameter, if the routine completed without error.  The correct length necessary to retrieve the button capabilities can be found in the capability data returned for the device by the HIDGetCaps function.
   @param preparsedDataRef Preparsed data reference for the report that is retuned by the HIDOpenReportDescriptor function
   @result OSStatus Returns an error code if an error was encountered or noErr on success.
  */
@@ -530,7 +545,7 @@ HIDGetSpecificButtonCaps   (HIDReportType			reportType,
   @param collection Specifies a link collection identifier to use as a search criteria.  If this parameter is non-zero, then only buttons that are part of the specified link collection are retrieved.
   @param usage Specifies a usage identifier to use as a search criteria.  If this parameter is non-zero, then only buttons that match the value specified are retrieved.
   @param buttonCaps Points to a caller-allocated buffer that will contain, on return, an array of HIDButtonCapabilities structures.  The structures contain information for all buttons that meet the search criteria.
-  @param buttonCapsLength On input, specifies the length, in array elements, of the buffer provided in the buttonCaps parameter.  On output, this parameter is set to the actual number of elements that were returned by the function call, in the buffer provided in the buttonCaps parameter, if the routine completed without error.  The correct length necessary to retrieve the button capabilities can be found in the capability data returned for the device by the HIDGetCaps function.
+  @param buttonCapsSize On input, specifies the length, in array elements, of the buffer provided in the buttonCaps parameter.  On output, this parameter is set to the actual number of elements that were returned by the function call, in the buffer provided in the buttonCaps parameter, if the routine completed without error.  The correct length necessary to retrieve the button capabilities can be found in the capability data returned for the device by the HIDGetCaps function.
   @param preparsedDataRef Preparsed data reference for the report that is retuned by the HIDOpenReportDescriptor function
   @result OSStatus Returns an error code if an error was encountered or noErr on success.
  */
@@ -790,7 +805,7 @@ HIDMaxUsageListLength	   (HIDReportType			reportType,
   @param usageValue Specifies the physical, or scaled, value to be set in the value for the given report.
   @param preparsedDataRef Preparsed data reference for the report that is retuned by the HIDOpenReportDescriptor function
   @param report Points to the caller-allocated buffer that contains the device report data.
-  @param Specifies the length, in bytes of the report data specified in the report parameter.
+  @param reportLength Specifies the length, in bytes of the report data specified in the report parameter.
   @result OSStatus Returns an error code if an error was encountered or noErr on success.
  */
 
@@ -891,7 +906,7 @@ HIDSetUsageValueArray	   (HIDReportType			reportType,
   @param currentUsageList Points to the newer button list to be used for comparison.
   @param breakUsageList On return, points to a caller-allocated buffer that contains the buttons set in the older list, specified in the previousUsageList parameter, but not set in the new list, specified in the currentUsageList parameter.
   @param makeUsageList On return, points to a caller-allocated buffer that contains the buttons set in the new list, specified in the currentUsageList parameter, but not set in the old list, specified in the previousUsageList parameter.
-  @param usageListsLength Specifies the length, in array elements, of the buffers provided in the currentUsageList and previousUssageList parameters.
+  @param usageListsSize Specifies the length, in array elements, of the buffers provided in the currentUsageList and previousUssageList parameters.
   @result OSStatus Returns an error code if an error was encountered or noErr on success.
  */
 

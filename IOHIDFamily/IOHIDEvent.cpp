@@ -22,11 +22,18 @@
  * @APPLE_LICENSE_HEADER_END@
  */
 #include <AssertMacros.h>
+#if KERNEL
 #include <IOKit/IOLib.h>
+#endif /*KERNEL*/
+#pragma clang diagnostic push
+#pragma clang diagnostic ignored "-Wdocumentation"
 #include "IOHIDEventTypes.h"
+#pragma clang diagnostic pop
 #include "IOHIDEvent.h"
 #include "IOHIDEventData.h"
 #include "IOHIDUsageTables.h"
+#include "IOHIDPrivateKeys.h"
+#include <math.h>
 
 #if !TARGET_OS_EMBEDDED
 #include "ev_keymap.h"
@@ -79,7 +86,7 @@ bool IOHIDEvent::initWithType(IOHIDEventType type, IOByteCount additionalCapacit
 
     IOHIDEventGetSize(type,capacity);
 
-    if ( !initWithCapacity(capacity+additionalCapacity) )
+    if ( !initWithCapacity((IOByteCount)(capacity+additionalCapacity ) ) )
         return false;
 
     _data->type = type;
@@ -202,8 +209,8 @@ IOHIDEvent * IOHIDEvent::keyboardEvent( AbsoluteTime            timeStamp,
     if (me) {
         IOHIDKeyboardEventData * keyboard = (IOHIDKeyboardEventData *)me->_data;
         keyboard->pressCount = pressCount;
-        SET_SUBFIELD_VALUE(keyboard->flags, longPress, kIOHIDKeyboardLongPressBit, kIOHIDKeyboardLongPressMask);
-        SET_SUBFIELD_VALUE(keyboard->flags, clickSpeed, kIOHIDKeyboardClickSpeedStartBit, kIOHIDKeyboardClickSpeedMask);
+        keyboard->longPress = longPress;
+        keyboard->clickSpeed = clickSpeed;
     }
     
     return me;
@@ -827,7 +834,7 @@ IOHIDEvent * IOHIDEvent::digitizerEvent(
     IOHIDDigitizerEventData *event = (IOHIDDigitizerEventData *)me->_data;
 
     if ( inRange ) {
-        event->options |= kIOHIDTransducerRange;
+        event->options.range = 1;
     }
 
     event->eventMask        = 0;       // todo:
@@ -1072,7 +1079,7 @@ IOHIDEvent * IOHIDEvent::powerEvent(
 
     IOHIDPowerEventData *event = (IOHIDPowerEventData *)me->_data;
 
-    event->measurement = measurement;
+    event->measurement = (IOFixed)measurement;
     event->powerType = powerType;
     event->powerSubType = powerSubType;
 
@@ -1245,7 +1252,7 @@ IOHIDEvent * IOHIDEvent::extendedGameControllerEvent(AbsoluteTime               
     
     event = (IOHIDGameControllerEventData *)me->_data;
     
-    event->controllerType = 1;
+    event->controllerType = kIOHIDGameControllerTypeExtended;
     event->shoulder.l2  = shoulderL2;
     event->shoulder.r2  = shoulderR2;
     event->joystick.x   = joystickX;
@@ -1278,7 +1285,7 @@ IOHIDEvent * IOHIDEvent::humidityEvent(AbsoluteTime timeStamp, IOFixed rh, UInt3
 }
 
 //++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++
-// IOHIDEvent::humidityEvent
+// IOHIDEvent::brightnessEvent
 //++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++
 IOHIDEvent * IOHIDEvent::brightnessEvent(AbsoluteTime timeStamp, IOFixed currentBrightness, IOFixed targetBrightness, UInt64 transitionTime, IOOptionBits options)
 {
@@ -1297,6 +1304,45 @@ IOHIDEvent * IOHIDEvent::brightnessEvent(AbsoluteTime timeStamp, IOFixed current
   
     return me;
 }
+
+//++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++
+// IOHIDEvent::orienrationEvent
+//++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++
+IOHIDEvent *   IOHIDEvent::orientationEvent(AbsoluteTime timeStamp, UInt32 orientationType, IOOptionBits options)
+{
+    IOHIDEvent *me = new IOHIDEvent;
+    
+    if (me && !me->initWithTypeTimeStamp(kIOHIDEventTypeOrientation, timeStamp, options)) {
+        me->release();
+        return 0;
+    }
+    
+    __IOHIDOrientationEventData *event = (__IOHIDOrientationEventData *) me->_data;
+    
+    event->orientationType = orientationType;
+	
+	return me;
+}
+
+//++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++
+// IOHIDEvent::genericGestureEvent
+//++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++
+IOHIDEvent * IOHIDEvent::genericGestureEvent(AbsoluteTime timeStamp, IOHIDGenericGestureType gestureType, IOOptionBits options)
+{
+    IOHIDEvent *me = new IOHIDEvent;
+    
+    if (me && !me->initWithTypeTimeStamp(kIOHIDEventTypeGenericGesture, timeStamp, options)) {
+        me->release();
+        return NULL;
+    }
+    
+    __IOHIDGenericGestureEventData *event = (__IOHIDGenericGestureEventData *) me->_data;
+    
+    event->gestureType = gestureType;
+    
+    return me;
+}
+
 
 //==============================================================================
 // IOHIDEvent::appendChild
@@ -1347,8 +1393,8 @@ SInt32 IOHIDEvent::getIntegerValue(     IOHIDEventField         key,
 {
     SInt32 value = 0;
 
-    GET_EVENT_VALUE(this, key, value, options);
-
+    GET_EVENT_VALUE(this, key, value, options, Integer);
+    
     return value;
 }
 
@@ -1360,7 +1406,7 @@ IOHIDDouble IOHIDEvent::getDoubleValue( IOHIDEventField         key,
 {
     IOHIDDouble value = 0;
 
-    GET_EVENT_VALUE_FIXED(this, key, value, options);
+    GET_EVENT_VALUE(this, key, value, options, Double);
   
     return value;
 }
@@ -1376,7 +1422,7 @@ IOFixed IOHIDEvent::getFixedValue(      IOHIDEventField         key,
 {
     IOFixed value = 0;
 
-    GET_EVENT_VALUE_FIXED(this, key, value, options);
+    GET_EVENT_VALUE(this, key, value, options, Fixed);
 
     return value;
 }
@@ -1386,11 +1432,11 @@ IOFixed IOHIDEvent::getFixedValue(      IOHIDEventField         key,
 //==============================================================================
 UInt8 * IOHIDEvent::getDataValue(IOHIDEventField key, IOOptionBits options)
 {
-    UInt8 * dataValue = NULL;
+    UInt8 * value = NULL;
+
+    GET_EVENT_DATA(this, key, value, options)
     
-    GET_EVENT_DATA(this, key, dataValue, options)
-    
-    return dataValue;
+    return value;
 }
 
 
@@ -1401,7 +1447,7 @@ void IOHIDEvent::setIntegerValue(       IOHIDEventField         key,
                                         SInt32                  value,
                                         IOOptionBits            options)
 {
-    SET_EVENT_VALUE(this, key, value, options);
+    SET_EVENT_VALUE(this, key, value, options, Integer);
 }
 
 //==============================================================================
@@ -1411,8 +1457,9 @@ void IOHIDEvent::setFixedValue(         IOHIDEventField         key,
                                         IOFixed                 value,
                                         IOOptionBits            options)
 {
-    SET_EVENT_VALUE_FIXED(this, key, value, options);
+    SET_EVENT_VALUE(this, key, value, options, Fixed);
 }
+
 //==============================================================================
 // IOHIDEvent::setDoubleValue
 //==============================================================================
@@ -1420,9 +1467,7 @@ void IOHIDEvent::setDoubleValue( IOHIDEventField         key,
                                  IOHIDDouble             value,
                                  IOOptionBits            options)
 {
-
-    SET_EVENT_VALUE_FIXED(this, key, value, options);
-  
+    SET_EVENT_VALUE(this, key, value, options, Double);
 }
 
 //==============================================================================
@@ -1510,20 +1555,39 @@ IOHIDEvent * IOHIDEvent::withBytes(     const void *            bytes,
         return NULL;
 
     queueElement    = (IOHIDSystemQueueElement *)bytes;
-    total           = size - sizeof(IOHIDSystemQueueElement);
+    total           = (UInt32)size - sizeof(IOHIDSystemQueueElement);
 
     for (index=0; index<queueElement->eventCount && offset<total; index++)
     {
+        if (((UInt32)(queueElement->attributeLength + offset)) < queueElement->attributeLength)
+            break;
+        
         if ( (queueElement->attributeLength + offset) > total )
             break;
+        
+        if ((total - (queueElement->attributeLength + offset)) < sizeof(IOHIDEventData) )
+            break;
+        
         IOHIDEventData *    eventData   = (IOHIDEventData *)(queueElement->payload + queueElement->attributeLength + offset);
         if ( eventData->type >= kIOHIDEventTypeCount )
             break;
         IOHIDEvent *        event       = IOHIDEvent::withType(eventData->type);
 
         if ( !event )
-            continue;
+            break;
 
+        if ( eventData->size < event->_data->size )
+            break;
+        
+        if ( (total - (queueElement->attributeLength + offset)) < eventData->size )
+            break;
+        
+        if ( eventData->type == kIOHIDEventTypeVendorDefined ) {
+            
+            if ( !event->initWithCapacity(eventData->size) )
+                break;
+        }
+        
         bcopy(eventData, event->_data, event->_data->size);
         AbsoluteTime_to_scalar(&(event->_timeStamp)) = queueElement->timeStamp;
         event->_options = queueElement->options;
@@ -1533,6 +1597,7 @@ IOHIDEvent * IOHIDEvent::withBytes(     const void *            bytes,
             parent = event;
         else {
             //Append event here;
+            parent->appendChild(event);
             event->release();
         }
         
@@ -1543,14 +1608,23 @@ IOHIDEvent * IOHIDEvent::withBytes(     const void *            bytes,
 
     return parent;
 }
-
+//==============================================================================
+// IOHIDEvent::getChildren
+//==============================================================================
+OSArray* IOHIDEvent::getChildren()
+{
+    return _children;
+}
 //==============================================================================
 // IOHIDEvent::readBytes
 //==============================================================================
 IOByteCount IOHIDEvent::readBytes(void * bytes, IOByteCount withLength)
 {
     IOHIDSystemQueueElement *   queueElement= NULL;
-
+    
+    if ( withLength < sizeof(IOHIDSystemQueueElement) )
+        return 0;
+    
     queueElement    = (IOHIDSystemQueueElement *)bytes;
 
     queueElement->timeStamp         = *((uint64_t *)&_timeStamp);

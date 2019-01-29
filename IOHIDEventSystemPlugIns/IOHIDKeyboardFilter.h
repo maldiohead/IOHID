@@ -14,6 +14,8 @@
 #include <CoreFoundation/CFPlugInCOM.h>
 #endif
 
+#import <Foundation/Foundation.h>
+
 #include <IOKit/hid/IOHIDServiceFilterPlugIn.h>
 #include <IOKit/hid/IOHIDUsageTables.h>
 #include <map>
@@ -80,6 +82,7 @@ private:
     IOHIDServiceFilterPlugInInterface *_serviceInterface;
     CFUUIDRef                   _factoryID;
     UInt32                      _refCount;
+    SInt32                      _matchScore;
 
     static IOHIDServiceFilterPlugInInterface sIOHIDKeyboardFilterFtbl;
     static HRESULT QueryInterface( void *self, REFIID iid, LPVOID *ppv );
@@ -156,6 +159,9 @@ private:
     boolean_t       _capsLockLEDState;
     boolean_t       _capsLockLEDInhibit;
     CFStringRef     _capsLockLED;
+    
+    NSNumber        *_restoreState;
+    NSNumber        *_locationID;
   
     IOHIDEventRef processStickyKeys(IOHIDEventRef event);
     void setStickyKeyState(UInt32 usagePage, UInt32 usage, StickyKeyState state);
@@ -169,8 +175,8 @@ private:
 
   
     void dispatchStickyKeys(int stateMask);
-    uint32_t processStickyKeyUp(UInt32 usagePage, UInt32 usage);
-    uint32_t processStickyKeyDown(UInt32 usagePage, UInt32 usage);
+    UInt32 processStickyKeyUp(UInt32 usagePage, UInt32 usage, UInt32 &flags);
+    UInt32 processStickyKeyDown(UInt32 usagePage, UInt32 usage, UInt32 &flags);
     void processStickyKeys(void);
     void processShiftKey(void);
     void updateStickyKeysState(StickyKeyState from, StickyKeyState to);
@@ -185,8 +191,8 @@ private:
     void dispatchKeyRepeat(void);
     
     void processCapsLockState(IOHIDEventRef event);
-    void setCapsLockState(boolean_t state);
-    void updateCapslockLED();
+    void setCapsLockState(boolean_t state, CFTypeRef client);
+    void updateCapslockLED(CFTypeRef client);
   
     IOHIDEventRef processCapsLockDelay(IOHIDEventRef event);
     void dispatchCapsLock(void);
@@ -206,9 +212,9 @@ private:
     uint32_t getKeyboardID ();
     uint32_t getKeyboardID (uint16_t productID, uint16_t vendorID);
     bool isModifiersPressed ();
-
 #endif
-
+    
+    bool isDelayedEvent(IOHIDEventRef event);
     bool isKeyPressed (Key key);
     void serialize (CFMutableDictionaryRef  dict) const;
     CFMutableArrayRefWrap serializeMapper (const KeyMap &mapper) const;

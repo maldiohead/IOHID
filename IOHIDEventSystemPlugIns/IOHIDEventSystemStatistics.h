@@ -13,6 +13,10 @@
 #include <CoreFoundation/CFPlugInCOM.h>
 #endif
 
+#include <memory>
+#include <WirelessDiagnostics/AWDServerConnection.h>
+
+
 class IOHIDEventSystemStatistics
 {
 public:
@@ -47,12 +51,6 @@ private:
         uint32_t                    home_wake;
         uint32_t                    power_wake;
         uint32_t                    power_sleep;
-        uint32_t                    power;
-        uint32_t                    volume_increment;
-        uint32_t                    volume_decrement;
-        uint32_t                    power_filtered;
-        uint32_t                    volume_increment_filtered;
-        uint32_t                    volume_decrement_filtered;
         uint32_t                    high_latency;
     } Buttons;
 
@@ -72,18 +70,31 @@ private:
         uint32_t                    cursor_count;
         uint32_t                    modifier_count;
     } KeyStats;
+    
+    typedef struct {
+        uint32_t                    open_count;
+        uint32_t                    close_count;
+        uint32_t                    toggled_50ms;
+        uint32_t                    toggled_50_100ms;
+        uint32_t                    toggled_100_250ms;
+        uint32_t                    toggled_250_500ms;
+        uint32_t                    toggled_500_1000ms;
+        uint32_t                    unknownStateEnter;
+        uint32_t                    unknownStateExit;
+    } HESStats;
 
     Buttons _pending_buttons;
     MotionStats _pending_motionstats;
     uint64_t _last_motionstat_ts;
     KeyStats _pending_keystats;
+    HESStats _pending_hesstats;
     
     CFMutableSetRef             _keyServices;
+    CFMutableSetRef             _hesServices;
     
-    CFMutableArrayRef           _logStrings;
-    aslclient                   _asl;
-    int                         _logfd;
-    bool                        _logButtonFiltering;
+    IOHIDEventRef               _attachEvent;
+    
+    std::shared_ptr<awd::AWDServerConnection> _awdConnection;
     
 private:
     static IOHIDSessionFilterPlugInInterface sIOHIDEventSystemStatisticsFtbl;
@@ -104,6 +115,7 @@ private:
     
     bool collectMotionStats(IOHIDServiceRef sender, IOHIDEventRef event);
     bool collectKeyStats(IOHIDServiceRef sender, IOHIDEventRef event);
+    bool collectHESStats(IOHIDServiceRef sender, IOHIDEventRef event);
     
     static bool isCharacterKey(uint16_t usagePage, uint16_t usage);
     static bool isSymbolKey(uint16_t usagePage, uint16_t usage);

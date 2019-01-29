@@ -557,7 +557,7 @@ static void AccelerateScrollAxis(   IOFixed *               axisp,
         avgCount ++;
         
         if ((scaleInfo->state.deltaTime[avgIndex] <= 0) ||
-            (scaleInfo->state.deltaTime[avgIndex] >= SCROLL_EVENT_THRESHOLD_MS)) {
+            (scaleInfo->state.deltaTime[avgIndex] >= (IOFixed)SCROLL_EVENT_THRESHOLD_MS)) {
             // the previous event was too long before this one. stop looking.
             avgTimeDeltaMS += SCROLL_EVENT_THRESHOLD_MS;
             break;
@@ -565,7 +565,7 @@ static void AccelerateScrollAxis(   IOFixed *               axisp,
         
         avgTimeDeltaMS  += scaleInfo->state.deltaTime[avgIndex];
 
-        if (avgTimeDeltaMS >= (SCROLL_CLEAR_THRESHOLD_MS_LL * kIOFixedOne)) {
+        if (avgTimeDeltaMS >= (IOFixed)(SCROLL_CLEAR_THRESHOLD_MS_LL * kIOFixedOne)) {
             // the previous event was too long ago. stop looking.
             break;
         }
@@ -577,10 +577,10 @@ static void AccelerateScrollAxis(   IOFixed *               axisp,
     avgAxis         = (avgCount) ? (avgAxis / avgCount) : 0;
     avgTimeDeltaMS  = (avgCount) ? (avgTimeDeltaMS / avgCount) : 0;
     avgTimeDeltaMS  = IOFixedMultiply(avgTimeDeltaMS, rateMultiplier);
-    if (avgTimeDeltaMS > SCROLL_EVENT_THRESHOLD_MS) {
+    if (avgTimeDeltaMS > (IOFixed)SCROLL_EVENT_THRESHOLD_MS) {
         avgTimeDeltaMS = SCROLL_EVENT_THRESHOLD_MS;
     }
-    else if (avgTimeDeltaMS < kIOFixedOne) {
+    else if (avgTimeDeltaMS < (IOFixed)kIOFixedOne) {
         // anything less than 1 ms is not resonable
         avgTimeDeltaMS = kIOFixedOne;
     }
@@ -858,7 +858,7 @@ void IOHIPointing::setupScrollForAcceleration( IOFixed desired )
             IOFixed     res = scrollResolutionForType(type);
             // Zero scroll resolution says you don't want acceleration.
             if ( res ) {
-                _scrollWheelInfo->axis[type].isHighResScroll    = res > (SCROLL_DEFAULT_RESOLUTION * 2);
+                _scrollWheelInfo->axis[type].isHighResScroll    = res > (IOFixed)(SCROLL_DEFAULT_RESOLUTION * 2);
                 _scrollPointerInfo->axis[type].isHighResScroll  = _scrollWheelInfo->axis[type].isHighResScroll;
 
                 _scrollWheelInfo->axis[type].consumeClearThreshold = (IOFixedDivide(res, SCROLL_CONSUME_RESOLUTION) >> 16) * 2;
@@ -919,7 +919,7 @@ void IOHIPointing::setupScrollForAcceleration( IOFixed desired )
                     accelTable = copyScrollAccelerationTableForType(type);
 
                     // Setup pixel scroll wheel acceleration table
-                    devScale = IOFixedDivide( res, reportRate );
+                    devScale = reportRate ? IOFixedDivide( res, reportRate ) : 0;
                     scrScale = IOFixedDivide( SCREEN_RESOLUTION, FRAME_RATE );
 
                     SetupAcceleration (accelTable, desired, devScale, scrScale, &(_scrollWheelInfo->axis[type].scaleSegments), &(_scrollWheelInfo->axis[type].scaleSegCount));
@@ -1369,7 +1369,7 @@ IOReturn IOHIPointing::setParamProperties( OSDictionary * dict )
     }
 
     number = OSDynamicCast( OSNumber, dict->getObject(kIOHIDDeviceScrollWithTrackpadKey));
-    if((number) && OSDynamicCast( OSString, scrollAccelKey ) && scrollAccelKey->isEqualTo(kIOHIDTrackpadScrollAccelerationKey))
+    if((number) && scrollAccelKey && OSDynamicCast( OSString, scrollAccelKey ) && scrollAccelKey->isEqualTo(kIOHIDTrackpadScrollAccelerationKey))
     {
         _scrollOff = number->unsigned32BitValue() == 0;
     }
@@ -1384,7 +1384,7 @@ IOReturn IOHIPointing::setParamProperties( OSDictionary * dict )
          (data = OSDynamicCast( OSData, dict->getObject(pointerAccelKey)))))
     {
         value = (number) ? number->unsigned32BitValue() :
-                            *((UInt32 *) (data->getBytesNoCopy()));
+        (data->getLength() >=4 ? *((UInt32 *) (data->getBytesNoCopy())) : 0);
         setupForAcceleration( value );
         updated = true;
     }
@@ -1394,7 +1394,7 @@ IOReturn IOHIPointing::setParamProperties( OSDictionary * dict )
 		dict->getObject(kIOHIDPointerAccelerationKey)))) {
 
         value = (number) ? number->unsigned32BitValue() :
-                            *((UInt32 *) (data->getBytesNoCopy()));
+        (data->getLength() >=4 ? *((UInt32 *) (data->getBytesNoCopy())) : 0);
 
         setupForAcceleration( value );
         updated = true;
@@ -1419,7 +1419,7 @@ IOReturn IOHIPointing::setParamProperties( OSDictionary * dict )
         ((number = OSDynamicCast( OSNumber, dict->getObject(scrollAccelKey))) ||
          (data = OSDynamicCast( OSData, dict->getObject(scrollAccelKey))))) {
         value = (number) ? number->unsigned32BitValue() :
-                            *((UInt32 *) (data->getBytesNoCopy()));
+                            (data->getLength() >=4 ? *((UInt32 *) (data->getBytesNoCopy())) : 0);
         setupScrollForAcceleration( value );
         updated = true;
     }
@@ -1427,7 +1427,7 @@ IOReturn IOHIPointing::setParamProperties( OSDictionary * dict )
             (data = OSDynamicCast( OSData, dict->getObject(kIOHIDScrollAccelerationKey)))) {
 
         value = (number) ? number->unsigned32BitValue() :
-                            *((UInt32 *) (data->getBytesNoCopy()));
+                            (data->getLength() >=4 ? *((UInt32 *) (data->getBytesNoCopy())) : 0);
 
         setupScrollForAcceleration( value );
         updated = true;
@@ -1452,7 +1452,7 @@ IOReturn IOHIPointing::setParamProperties( OSDictionary * dict )
         (data = OSDynamicCast(OSData,
                               dict->getObject(kIOHIDPointerConvertAbsoluteKey))))
     {
-        value = (number) ? number->unsigned32BitValue() : *((UInt32 *) (data->getBytesNoCopy()));
+        value = (number) ? number->unsigned32BitValue() : (data->getLength() >=4 ? *((UInt32 *) (data->getBytesNoCopy())) : 0);
         _convertAbsoluteToRelative = (value != 0) ? true : false;
         updated = true;
     }
@@ -1462,7 +1462,7 @@ IOReturn IOHIPointing::setParamProperties( OSDictionary * dict )
         (data = OSDynamicCast(OSData,
                               dict->getObject(kIOHIDPointerContactToMoveKey))))
     {
-        value = (number) ? number->unsigned32BitValue() : *((UInt32 *) (data->getBytesNoCopy()));
+        value = (number) ? number->unsigned32BitValue() : (data->getLength() >=4 ? *((UInt32 *) (data->getBytesNoCopy())) : 0);
         _contactToMove = (value != 0) ? true : false;
         updated = true;
     }
@@ -1471,7 +1471,7 @@ IOReturn IOHIPointing::setParamProperties( OSDictionary * dict )
         (data = OSDynamicCast(OSData, dict->getObject(kIOHIDPointerButtonMode))))
     {
         value = (number) ? number->unsigned32BitValue() :
-                                            *((UInt32 *) (data->getBytesNoCopy()));
+                                            (data->getLength() >=4 ? *((UInt32 *) (data->getBytesNoCopy())) : 0);
 
         if (getProperty(kIOHIDPointerButtonCountKey))
         {
@@ -1501,7 +1501,7 @@ IOReturn IOHIPointing::setParamProperties( OSDictionary * dict )
         (data = OSDynamicCast(OSData, dict->getObject(kIOHIDScrollMouseButtonKey))))
 	{
 		value = (number) ? number->unsigned32BitValue() :
-                                            *((UInt32 *) (data->getBytesNoCopy())) ;
+                                            (data->getLength() >=4 ? *((UInt32 *) (data->getBytesNoCopy())) : 0);
 
         if (!value)
             _scrollButtonMask = 0;
@@ -1574,7 +1574,7 @@ IOFixed	IOHIPointing::scrollResolutionForType(SInt32 type)
         }
     }
 
-	if( OSDynamicCast( OSNumber, number ) )
+	if( number && OSDynamicCast( OSNumber, number ) )
 		res = number->unsigned32BitValue();
     OSSafeReleaseNULL(number);
 
@@ -1787,7 +1787,6 @@ bool SetupAcceleration (OSData * data, IOFixed desired, IOFixed devScale, IOFixe
     // or take all the high one
     else {
         lowTable	= highTable;
-        lowAccl		= highAccl;
         lowPoints	= 0;
     }
 
@@ -1850,16 +1849,19 @@ bool SetupAcceleration (OSData * data, IOFixed desired, IOFixed devScale, IOFixe
         scaledY2 = IOFixedMultiply( crsrScale,
                       /* newY */    Interpolate( x1, y1, x2, y2, x3, y3,
                                             scale, lower ) );
-        if( lowPoints || highPoints)
-            segment->devUnits = scaledX2;
-        else
-            segment->devUnits = MAX_DEVICE_THRESHOLD;
-
-        segment->slope = ((scaledX2 == scaledX1)) ? 0 :
-                IOFixedDivide((scaledY2 - scaledY1), (scaledX2 - scaledX1));
-
-        segment->intercept = scaledY2
-                            - IOFixedMultiply( segment->slope, scaledX2 );
+        if (segment) {
+            if( lowPoints || highPoints)
+                segment->devUnits = scaledX2;
+            else
+                segment->devUnits = MAX_DEVICE_THRESHOLD;
+            
+            segment->slope = ((scaledX2 == scaledX1)) ? 0 :
+                     IOFixedDivide((scaledY2 - scaledY1), (scaledX2 - scaledX1));
+            
+            segment->intercept = scaledY2
+                                 - IOFixedMultiply( segment->slope, scaledX2 );
+        }
+            
 /*        HIDLog("devUnits = %08lx, slope = %08lx, intercept = %08lx",
                 segment->devUnits, segment->slope, segment->intercept); */
 

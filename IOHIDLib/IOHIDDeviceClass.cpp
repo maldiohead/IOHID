@@ -32,7 +32,6 @@
 #include "IOHIDQueueClass.h"
 #include "IOHIDTransactionClass.h"
 #include "IOHIDPrivateKeys.h"
-#include "IOHIDParserPriv.h"
 #include "IOHIDDebug.h"
 
 __BEGIN_DECLS
@@ -42,6 +41,9 @@ __BEGIN_DECLS
 #include <IOKit/IODataQueueClient.h>
 #include <System/libkern/OSCrossEndian.h>
 __END_DECLS
+
+#include "IOHIDDescriptorParser.h"
+#include "IOHIDDescriptorParserPrivate.h"
 
 #define connectCheck() do {	    \
     if (!fConnection)		    \
@@ -371,7 +373,6 @@ IOReturn IOHIDDeviceClass::start(CFDictionaryRef propertyTable __unused, io_serv
 {
     IOReturn 			res;
     kern_return_t 		kr;
-    CFMutableDictionaryRef	properties;
 
     fService = inService;
     IOObjectRetain(fService);
@@ -403,12 +404,12 @@ IOReturn IOHIDDeviceClass::start(CFDictionaryRef propertyTable __unused, io_serv
 
     // Register for an interest notification of this device being removed. Use a reference to our
     // private data as the refCon which will be passed to the notification callback.
-    kr = IOServiceAddInterestNotification( fNotifyPort,
-                                            fService,
-                                            kIOGeneralInterest,
-                                            IOHIDDeviceClass::_deviceNotification,
-                                            fNotifyPrivateDataRef,
-                                            &(fNotifyPrivateDataRef->notification));
+    IOServiceAddInterestNotification( fNotifyPort,
+                                      fService,
+                                      kIOGeneralInterest,
+                                      IOHIDDeviceClass::_deviceNotification,
+                                      fNotifyPrivateDataRef,
+                                      &(fNotifyPrivateDataRef->notification));
 
 
     // Create port to determine if mem maps are valid.  Use 
@@ -431,8 +432,8 @@ IOReturn IOHIDDeviceClass::start(CFDictionaryRef propertyTable __unused, io_serv
 
     HIDLog("IOHIDDeviceClass::start: elementCount=%lld reportHandlerCount=%lld\n", output[0], output[1]);
 
-    fElementCount               = output[0];
-    fReportHandlerElementCount  = output[1];
+    fElementCount               = (uint32_t)output[0];
+    fReportHandlerElementCount  = (uint32_t)output[1];
     
     
     buildElements(kHIDElementType, &fElementData, &fElements, &fElementCount);
@@ -532,10 +533,10 @@ Boolean IOHIDDeviceClass::isValid()
             args[0] = 1;
             args[1] = fGeneration;
 
-            kr = IOConnectCallScalarMethod(fConnection, kIOHIDLibUserClientDeviceIsValid, 0, 0, args, &len); 
+            IOConnectCallScalarMethod(fConnection, kIOHIDLibUserClientDeviceIsValid, 0, 0, args, &len);
             
             if ( args[0] /*valid*/ )
-                kr = createSharedMemory(args[1] /*generation */);
+                createSharedMemory(args[1] /*generation */);
             else {
                 fCurrentValuesMappedMemory      = 0;
                 fCurrentValuesMappedMemorySize  = 0;
@@ -583,11 +584,10 @@ IOReturn IOHIDDeviceClass::setProperty(CFStringRef key, CFTypeRef property)
 // to the IOHIDDeviceClass.  The other is used by the client to get removal 
 // notification via fAsyncPort.  This method is used by both and disguished 
 // by the port in the refcon.
-void IOHIDDeviceClass::_deviceNotification(void *refCon, io_service_t service __unused, natural_t messageType, void * messageArgument )
+void IOHIDDeviceClass::_deviceNotification(void *refCon, io_service_t service __unused, natural_t messageType, void * messageArgument __unused )
 {
     IOHIDDeviceClass *  self;
     MyPrivateData *     privateDataRef  = (MyPrivateData *) refCon;
-    IOOptionBits        options         = (IOOptionBits)((addr64_t)messageArgument);
     
     if (!privateDataRef)
         return;
@@ -737,8 +737,8 @@ IOReturn IOHIDDeviceClass::close(IOOptionBits options __unused)
     openCheck();
     connectCheck();
 
-    ret = releaseSharedMemory();
-
+    releaseSharedMemory();
+    
     uint32_t len = 0;
 
     ret = IOConnectCallScalarMethod(fConnection, kIOHIDLibUserClientClose, 0, 0, 0, &len); 
@@ -760,7 +760,7 @@ IOReturn IOHIDDeviceClass::getElementValue(IOHIDElementRef element, IOHIDValueRe
     if ((kr == kIOReturnSuccess) && ((options & kHIDGetElementValuePreventPoll) == 0) && ((options & kHIDGetElementValueForcePoll) || ((IOHIDElementGetType(element) == kIOHIDElementTypeFeature))))
     {        
         uint64_t    input = (uint64_t) IOHIDElementGetCookie(element);
-        size_t    outputCount = 0;
+        //size_t    outputCount = 0;
             
         allChecks();
 
@@ -810,7 +810,7 @@ IOReturn IOHIDDeviceClass::setElementValue(IOHIDElementRef element, IOHIDValueRe
 IOReturn IOHIDDeviceClass::getCurrentElementValueAndGeneration(IOHIDElementRef element, IOHIDValueRef *pEvent, uint32_t * pGeneration)
 {
     IOHIDElementStruct  elementStruct;
-    IOHIDEventStruct    valueEvent;
+    //IOHIDEventStruct    valueEvent;
     IOHIDValueRef       valueRef;
     
     allChecks();
@@ -940,13 +940,15 @@ IOHIDDeviceClass::getReport(IOHIDReportType     reportType,
 {
     uint64_t    in[3];
     IOReturn    ret;
-    size_t      reportLength = *pReportLength;
+    size_t      reportLength = 0;
 
     allChecks();
     
     if (!pReportLength || (*pReportLength < 0))
     	return kIOReturnNoMemory;
-    	
+    
+    reportLength = *pReportLength;
+    
     // Async getReport
     if (callback) 
     {
@@ -1014,7 +1016,7 @@ bool IOHIDDeviceClass::getElementDictIntValue(CFDictionaryRef element, CFStringR
     else {
         if (typeID == CFNumberGetTypeID())
         {
-            if (CFNumberGetValue((CFNumberRef) object, kCFNumberLongType, &number))
+            if (CFNumberGetValue((CFNumberRef) object, kCFNumberIntType, &number))
             {
                 *value = number;
                 return true;
@@ -1156,11 +1158,11 @@ IOHIDDeviceClass::copyMatchingElements(CFDictionaryRef matchingDict, CFArrayRef 
    if (!elements)
         return kIOReturnBadArgument;
      
-    IOHIDElementStruct      element;
+    //IOHIDElementStruct      element;
     CFMutableArrayRef       tempElements        = 0;
-    CFMutableArrayRef       subElements         = 0;
+    //CFMutableArrayRef       subElements         = 0;
     CFTypeRef               elementType         = 0;
-    CFTypeRef               object              = 0;
+    //CFTypeRef               object              = 0;
     uint32_t                number              = 0;
     uint32_t                index               = 0;
     uint32_t                matchingCookieMin   = 0;
@@ -1474,7 +1476,7 @@ IOReturn IOHIDDeviceClass::setInterruptReportCallback(uint8_t * report, CFIndex 
                 queueDepth = kInputReportQueueDeptch_8ms;
             }
         }
-                
+        
         require_noerr((ret = fReportHandlerQueue->create(0, queueDepth)), SET_REPORT_HANDLER_CLEANUP);
         
         for (uint32_t i=0; i<fReportHandlerElementCount; i++) {
@@ -1542,7 +1544,7 @@ void IOHIDDeviceClass::_hidReportHandlerCallback(void * refcon, IOReturn result,
     IOHIDValueRef           event;
     IOHIDDeviceClass *		self = (IOHIDDeviceClass *)refcon;
     IOHIDQueueClass *		queue = self->fReportHandlerQueue;
-    uint32_t                value, size = 0;
+    CFIndex                 size = 0;
 
     if (!self || !self->fIsOpen)
         return;
@@ -1605,7 +1607,7 @@ IOReturn IOHIDDeviceClass::startAllQueues()
     
     if ( fQueues )
     {
-        int			queueCount = CFSetGetCount(fQueues);
+        CFIndex            queueCount = CFSetGetCount(fQueues);
         IOHIDQueueClass **	queues = NULL;
         
         queues = (IOHIDQueueClass **)malloc(sizeof(IOHIDQueueClass *) * queueCount);
@@ -1631,7 +1633,7 @@ IOReturn IOHIDDeviceClass::stopAllQueues()
     
     if ( fQueues )
     {
-        int			queueCount = CFSetGetCount(fQueues);
+        CFIndex            queueCount = CFSetGetCount(fQueues);
         IOHIDQueueClass **	queues	= NULL;
     
         queues = (IOHIDQueueClass **)malloc(sizeof(IOHIDQueueClass *) * queueCount);
@@ -1712,7 +1714,7 @@ IOReturn IOHIDDeviceClass::_getAsyncEventSource(void * self, CFTypeRef * pSource
     
 IOReturn IOHIDDeviceClass::_copyMatchingElements(void * self, CFDictionaryRef matchingDict, CFArrayRef * elements, IOOptionBits options)
 {
-    IOReturn            ret     = kIOReturnNoMemory;
+    //IOReturn            ret     = kIOReturnNoMemory;
     IOHIDDeviceClass *  selfRef = getThis(self);
     
 	return selfRef->copyMatchingElements(matchingDict, elements, 0, selfRef->fElementCache, options);        
@@ -1794,7 +1796,7 @@ IOReturn IOHIDDeviceClass::buildElements( uint32_t type, CFMutableDataRef * pDat
             
     kr = IOConnectCallMethod(fConnection, kIOHIDLibUserClientGetElements, &input, 1, 0, 0, 0, 0, *buffer, &size); 
 
-    *count = size / sizeof(IOHIDElementStruct);
+    *count = (uint32_t)size / sizeof(IOHIDElementStruct);
 
     ROSETTA_ONLY(
         for ( uint32_t i=0; i<*count; i++)
@@ -2206,6 +2208,9 @@ IOReturn IOHIDObsoleteDeviceClass::setElementValue(IOHIDElementCookie cookie, IO
         
         kr = IOHIDDeviceClass::setElementValue(element, event, timeout, valueCallback, valueArgs, options);
         CFRelease(event);
+        if (valueArgs) {
+            free (valueArgs);
+        }
     }
     
     return kr;
@@ -2240,7 +2245,7 @@ IOReturn IOHIDObsoleteDeviceClass::queryElementValue(IOHIDElementCookie cookie, 
         
         if ((kr==kIOReturnSuccess) && event)
         {
-            uint32_t length = _IOHIDElementGetLength(IOHIDValueGetElement(event));
+            uint32_t length = (uint32_t)_IOHIDElementGetLength(IOHIDValueGetElement(event));
             
             pEvent->type                    = IOHIDElementGetType(IOHIDValueGetElement(event));
             pEvent->elementCookie           = IOHIDElementGetCookie(IOHIDValueGetElement(event));
@@ -2256,11 +2261,14 @@ IOReturn IOHIDObsoleteDeviceClass::queryElementValue(IOHIDElementCookie cookie, 
             {
                 pEvent->longValueSize = 0;
                 pEvent->longValue     = NULL;
-                pEvent->value         = IOHIDValueGetIntegerValue(event);
+                pEvent->value         = (int32_t)IOHIDValueGetIntegerValue(event);
             }
         }
+        
+        if (valueArgs) {
+            free (valueArgs);
+        }
     }
-    
     return kr;
 }
 
@@ -2287,7 +2295,7 @@ IOReturn IOHIDObsoleteDeviceClass::getElementValue(IOHIDElementCookie cookie, IO
         
         if ((kr==kIOReturnSuccess) && event)
         {
-            uint32_t length = _IOHIDElementGetLength(IOHIDValueGetElement(event));
+            uint32_t length = (uint32_t)_IOHIDElementGetLength(IOHIDValueGetElement(event));
             
             pEvent->type                    = IOHIDElementGetType(IOHIDValueGetElement(event));
             pEvent->elementCookie           = IOHIDElementGetCookie(IOHIDValueGetElement(event));
@@ -2303,7 +2311,7 @@ IOReturn IOHIDObsoleteDeviceClass::getElementValue(IOHIDElementCookie cookie, IO
             {
                 pEvent->longValueSize = 0;
                 pEvent->longValue     = NULL;
-                pEvent->value         = IOHIDValueGetIntegerValue(event);
+                pEvent->value         = (int32_t)IOHIDValueGetIntegerValue(event);
             }
         }
     }
@@ -2386,7 +2394,7 @@ IOReturn IOHIDObsoleteDeviceClass::getReport(IOHIDReportType type, uint32_t id, 
     IOReturn ret = IOHIDDeviceClass::getReport(type, id, (uint8_t *)report, &pReportLength, timeout, reportCallback, reportContext);
     
     if ( pLength )
-        *pLength = pReportLength;
+        *pLength = (uint32_t)pReportLength;
         
     return ret;
 }
@@ -2440,14 +2448,14 @@ void IOHIDObsoleteDeviceClass::_reportCallback(
     IOHIDObsoleteCallbackArgs * args = (IOHIDObsoleteCallbackArgs*)context;
     
     if ( args->pLength )
-        *(args->pLength) = reportLength;
+        *(args->pLength) = (uint32_t)reportLength;
         
     (*(IOHIDReportCallbackFunction)args->callback)(
                         args->target,
                         result,
                         args->refcon,
                         sender,
-                        reportLength);
+                        (uint32_t)reportLength);
                         
     if ( args->self->fInputReportContext != context )
         free(context);
@@ -2456,9 +2464,8 @@ void IOHIDObsoleteDeviceClass::_reportCallback(
 IOHIDQueueInterface ** IOHIDObsoleteDeviceClass::allocQueue()
 {
     IOHIDQueueInterface **	iohidqueue;
-    HRESULT 			res;
     
-    res = this->queryInterface(CFUUIDGetUUIDBytes(kIOHIDQueueInterfaceID), (void **) &iohidqueue);
+    this->queryInterface(CFUUIDGetUUIDBytes(kIOHIDQueueInterfaceID), (void **) &iohidqueue);
 
     return iohidqueue;
 }
@@ -2466,9 +2473,8 @@ IOHIDQueueInterface ** IOHIDObsoleteDeviceClass::allocQueue()
 IOHIDOutputTransactionInterface ** IOHIDObsoleteDeviceClass::allocOutputTransaction()
 {
     IOHIDOutputTransactionInterface **	iohidoutputtransaction;
-    HRESULT 				res;
     
-    res = this->queryInterface(CFUUIDGetUUIDBytes(kIOHIDOutputTransactionInterfaceID), (void **) &iohidoutputtransaction);
+    this->queryInterface(CFUUIDGetUUIDBytes(kIOHIDOutputTransactionInterfaceID), (void **) &iohidoutputtransaction);
 
     return iohidoutputtransaction;
 }

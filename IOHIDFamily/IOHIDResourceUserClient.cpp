@@ -25,6 +25,7 @@
 #include <IOKit/IOLib.h>
 #include <sys/proc.h>
 #include <TargetConditionals.h>
+#include <os/overflow.h>
 
 #define kIOHIDManagerUserAccessUserDeviceEntitlement "com.apple.hid.manager.user-access-device"
 
@@ -35,12 +36,11 @@
 #include "IOHIDResourceUserClient.h"
 #include <libkern/OSAtomic.h>
 #include "IOHIDDebug.h"
+#include "IOHIDFamilyTrace.h"
 
 #define kHIDClientTimeoutUS     1000000ULL
 
 #define kHIDQueueSize           16384
-
-#define MIN(a,b) ((a) < (b) ? (a) : (b))
 
 #define super IOUserClient
 
@@ -113,8 +113,9 @@ exit:
 //----------------------------------------------------------------------------------------------------
 bool IOHIDResourceDeviceUserClient::start(IOService * provider)
 {
-    IOWorkLoop *    workLoop;
-    bool            result;
+    IOWorkLoop *workLoop;
+    bool result = false;
+    OSSerializer *debugSerializer = NULL;
     
     _owner = OSDynamicCast(IOHIDResource, provider);
     require_action(_owner, exit, result=false);
@@ -133,6 +134,10 @@ bool IOHIDResourceDeviceUserClient::start(IOService * provider)
     require_action(_commandGate, exit, result=false);
     require_noerr_action(workLoop->addEventSource(_commandGate), exit, result=false);
     
+    debugSerializer = OSSerializer::forTarget(this, OSMemberFunctionCast(OSSerializerCallback, this, &IOHIDResourceDeviceUserClient::serializeDebugState));
+    require(debugSerializer, exit);
+    setProperty("IOHIDUserDeviceDebugState", debugSerializer);
+    
     result = true;
     
 exit:
@@ -140,6 +145,8 @@ exit:
         HIDLogError("failed");
         stop(provider);
     }
+    
+    OSSafeReleaseNULL(debugSerializer);
 
     return result;
 }
@@ -163,6 +170,9 @@ void IOHIDResourceDeviceUserClient::stop(IOService * provider)
 
         workLoop->removeEventSource(_commandGate);
     }
+
+    releaseNotificationPort (_port);
+    _port = MACH_PORT_NULL;
 
 exit:
     super::stop(provider);
@@ -224,11 +234,15 @@ IOReturn IOHIDResourceDeviceUserClient::registerNotificationPortGated(mach_port_
     require_action(!isInactive(), exit, result=kIOReturnOffline);
     require_action(_queue, exit, result=kIOReturnError);
 
+    releaseNotificationPort (_port);
+    
     _port = port;
     _queue->setNotificationPort(port);
     
     result = kIOReturnSuccess;
+
 exit:
+    
     return result;
 }
 
@@ -258,7 +272,7 @@ IOReturn IOHIDResourceDeviceUserClient::clientMemoryForTypeGated(IOOptionBits * 
     require_action(!isInactive(), exit, ret=kIOReturnOffline);
     
     if ( !_queue ) {
-        _queue = IOHIDResourceQueue::withCapacity(kHIDQueueSize);
+        _queue = IOHIDResourceQueue::withCapacity(this, kHIDQueueSize);
     }
     
     require_action(_queue, exit, ret = kIOReturnNoMemory);
@@ -325,13 +339,18 @@ exit:
 IOMemoryDescriptor * IOHIDResourceDeviceUserClient::createMemoryDescriptorFromInputArguments(
                                             IOExternalMethodArguments * arguments)
 {
-    IOMemoryDescriptor * report = NULL;
+    IOBufferMemoryDescriptor * report = NULL;
     
     if ( arguments->structureInputDescriptor ) {
-        report = arguments->structureInputDescriptor;
-        report->retain();
+        IOByteCount length = arguments->structureInputDescriptor->getLength();
+        
+        report = IOBufferMemoryDescriptor::withCapacity(length, kIODirectionOut);
+        
+        arguments->structureInputDescriptor->prepare();
+        arguments->structureInputDescriptor->readBytes(0, report->getBytesNoCopy(), length);
+        arguments->structureInputDescriptor->complete();
     } else {
-        report = IOMemoryDescriptor::withAddress((void *)arguments->structureInput, arguments->structureInputSize, kIODirectionOut);
+        report = IOBufferMemoryDescriptor::withBytes(arguments->structureInput, arguments->structureInputSize, kIODirectionOut);
     }
     
     return report;
@@ -343,7 +362,7 @@ IOMemoryDescriptor * IOHIDResourceDeviceUserClient::createMemoryDescriptorFromIn
 //----------------------------------------------------------------------------------------------------
 IOService * IOHIDResourceDeviceUserClient::getService(void)
 {
-    return _owner ? _owner : NULL;
+    return _device ? _device : NULL;
 }
 
 //----------------------------------------------------------------------------------------------------
@@ -429,7 +448,8 @@ IOReturn IOHIDResourceDeviceUserClient::createDevice(IOExternalMethodArguments *
     propertiesData = IOMalloc(propertiesLength);
     require_action(propertiesData, exit, result=kIOReturnNoMemory);
     
-    propertiesDesc->prepare();
+    result = propertiesDesc->prepare();
+    require_noerr(result, exit);
     propertiesDesc->readBytes(0, propertiesData, propertiesLength);
     propertiesDesc->complete();
     
@@ -520,6 +540,8 @@ IOReturn IOHIDResourceDeviceUserClient::handleReport(IOExternalMethodArguments *
         AbsoluteTime_to_scalar(&timestamp) = arguments->scalarInput[0];
     else
         clock_get_uptime( &timestamp );
+    
+    _handleReportCount++;
     
     if ( !arguments->asyncWakePort ) {
         ret = _device->handleReportWithTime(timestamp, report);
@@ -615,7 +637,18 @@ IOReturn IOHIDResourceDeviceUserClient::getReportGated(ReportGatedArguments * ar
 
     _pending->setObject(retData);
     
-    require_action(_queue && _queue->enqueueReport(&header), exit, ret=kIOReturnNoMemory);
+    require_action(_queue, exit, ret = kIOReturnNotReady); // client has not mapped memory
+    
+    _getReportCount++;
+    
+    require_action(_queue->enqueueReport(&header), exit, {
+        HIDLogInfo("0x%llx: IOHIDUserDevice getReport enqueue failed.\n", getRegistryEntryID());
+        ret = kIOReturnNoMemory;
+        _getReportDroppedCount++;
+        _enqueueFailCount++;
+        _queue->sendDataAvailableNotification();
+        IOHID_DEBUG(kIOHIDDebugCode_HIDUserDeviceEnqueueFail, mach_continuous_time(), 0, 0, 0);
+    });
     
     // if we successfully enqueue, let's sleep till we get a result from postReportResult
     clock_interval_to_deadline(kMicrosecondScale, _maxClientTimeoutUS, &ts);
@@ -623,9 +656,12 @@ IOReturn IOHIDResourceDeviceUserClient::getReportGated(ReportGatedArguments * ar
     switch ( _commandGate->commandSleep(retData, ts, THREAD_ABORTSAFE) ) {
         case THREAD_AWAKENED:
             ret = result.ret;
+            _getReportCompletedCount++;
             break;
         case THREAD_TIMED_OUT:
+            HIDLogError("0x%llx: IOHIDUserDevice getReport thread timed out.\n", getRegistryEntryID());
             ret = kIOReturnTimeout;
+            _getReportTimeoutCount++;
             break;
         default:
             ret = kIOReturnError;
@@ -685,7 +721,18 @@ IOReturn IOHIDResourceDeviceUserClient::setReportGated(ReportGatedArguments * ar
 
     _pending->setObject(retData);
     
-    require_action(_queue && _queue->enqueueReport(&header, arguments->report), exit, ret=kIOReturnNoMemory);
+    require_action(_queue, exit, ret = kIOReturnNotReady); // client has not mapped memory
+    
+    _setReportCount++;
+    
+    require_action(_queue->enqueueReport(&header, arguments->report), exit, {
+        HIDLogInfo("0x%llx: IOHIDUserDevice setReport enqueue failed.\n", getRegistryEntryID());
+        ret = kIOReturnNoMemory;
+        _setReportDroppedCount++;
+        _enqueueFailCount++;
+        _queue->sendDataAvailableNotification();
+        IOHID_DEBUG(kIOHIDDebugCode_HIDUserDeviceEnqueueFail, mach_continuous_time(), 0, 0, 0);
+    });
 
     // if we successfully enqueue, let's sleep till we get a result from postReportResult
     clock_interval_to_deadline(kMicrosecondScale, _maxClientTimeoutUS, (uint64_t *)&ts);
@@ -693,9 +740,12 @@ IOReturn IOHIDResourceDeviceUserClient::setReportGated(ReportGatedArguments * ar
     switch ( _commandGate->commandSleep(retData, ts, THREAD_ABORTSAFE) ) {
         case THREAD_AWAKENED:
             ret = result.ret;
+            _setReportCompletedCount++;
             break;
         case THREAD_TIMED_OUT:
+            HIDLogError("0x%llx: IOHIDUserDevice setReport thread timed out.\n", getRegistryEntryID());
             ret = kIOReturnTimeout;
+            _setReportTimeoutCount++;
             break;
         default:
             ret = kIOReturnError;
@@ -817,6 +867,45 @@ IOReturn IOHIDResourceDeviceUserClient::_terminateDevice(
     return target->terminateDevice();
 }
 
+#define SET_DICT_NUM(dict, key, val) do { \
+    if (val) { \
+        OSNumber *num = OSNumber::withNumber(val, 64); \
+        if (num) { \
+            dict->setObject(key, num); \
+            num->release(); \
+        } \
+    } \
+} while (0);
+
+bool IOHIDResourceDeviceUserClient::serializeDebugState(void *ref __unused, OSSerialize *serializer)
+{
+    bool result = false;
+    OSDictionary *dict = OSDictionary::withCapacity(4);
+    
+    require(dict, exit);
+    
+    if (_queue) {
+        dict->setObject("ReportQueue", _queue);
+    }
+    
+    SET_DICT_NUM(dict, "SetReportCount", _setReportCount);
+    SET_DICT_NUM(dict, "SetReportCompletedCount", _setReportCompletedCount);
+    SET_DICT_NUM(dict, "SetReportDroppedCount", _setReportDroppedCount);
+    SET_DICT_NUM(dict, "SetReportTimeoutCount", _setReportTimeoutCount);
+    SET_DICT_NUM(dict, "GetReportCount", _getReportCount);
+    SET_DICT_NUM(dict, "GetReportCompletedCount", _getReportCompletedCount);
+    SET_DICT_NUM(dict, "GetReportDroppedCount", _getReportDroppedCount);
+    SET_DICT_NUM(dict, "GetReportTimeoutCount", _getReportTimeoutCount);
+    SET_DICT_NUM(dict, "EnqueueFailCount", _enqueueFailCount);
+    SET_DICT_NUM(dict, "HandleReportCount", _handleReportCount);
+    SET_DICT_NUM(dict, "MaxClientTimeoutUS", _maxClientTimeoutUS);
+    
+    result = dict->serialize(serializer);
+    OSSafeReleaseNULL(dict);
+    
+exit:
+    return result;
+}
 
 //====================================================================================================
 // IOHIDResourceQueue
@@ -838,6 +927,17 @@ IOHIDResourceQueue *IOHIDResourceQueue::withCapacity(UInt32 capacity)
     return dataQueue;
 }
 
+IOHIDResourceQueue *IOHIDResourceQueue::withCapacity(IOService *owner, UInt32 size)
+{
+    IOHIDResourceQueue *dataQueue = IOHIDResourceQueue::withCapacity(size);
+    
+    if (dataQueue) {
+        dataQueue->_owner = owner;
+    }
+    
+    return dataQueue;
+}
+
 void IOHIDResourceQueue::free()
 {
     if ( _descriptor )
@@ -855,16 +955,34 @@ Boolean IOHIDResourceQueue::enqueueReport(IOHIDResourceDataQueueHeader * header,
 {
     UInt32              headerSize  = sizeof(IOHIDResourceDataQueueHeader);
     UInt32              reportSize  = report ? (UInt32)report->getLength() : 0;
-    UInt32              dataSize    = ALIGNED_DATA_SIZE(headerSize + reportSize, sizeof(uint32_t));
+    UInt32              dataSize;
     UInt32              head;
     UInt32              tail;
     UInt32              newTail;
-    const UInt32        entrySize   = dataSize + DATA_QUEUE_ENTRY_HEADER_SIZE;
+    UInt32              entrySize;
     IODataQueueEntry *  entry;
+    UInt32              totalSize;
+    
+    // check overflow of headerSize + reportSize
+    if (os_add_overflow(headerSize, reportSize, &totalSize)) {
+        return false;
+    }
 
+    dataSize = ALIGNED_DATA_SIZE(totalSize, sizeof(uint32_t));
+    
+    // check overflow after alignment
+    if (dataSize < totalSize) {
+        return false;
+    }
+    
+    // check overflow of entrySize
+    if (os_add_overflow(dataSize, DATA_QUEUE_ENTRY_HEADER_SIZE, &entrySize)) {
+        return false;
+    }
+    
     // Force a single read of head and tail
-    head = __c11_atomic_load((_Atomic UInt32 *)&dataQueue->head, __ATOMIC_RELAXED);
     tail = __c11_atomic_load((_Atomic UInt32 *)&dataQueue->tail, __ATOMIC_RELAXED);
+    head = __c11_atomic_load((_Atomic UInt32 *)&dataQueue->head, __ATOMIC_ACQUIRE);
 
     if ( tail > getQueueSize() || head > getQueueSize() || dataSize < headerSize || entrySize < dataSize)
     {
@@ -942,16 +1060,17 @@ Boolean IOHIDResourceQueue::enqueueReport(IOHIDResourceDataQueueHeader * header,
     }
 
     // Update tail with release barrier
+    _enqueueTS = mach_continuous_time();
     __c11_atomic_store((_Atomic UInt32 *)&dataQueue->tail, newTail, __ATOMIC_RELEASE);
-
+    
     // Send notification (via mach message) that data is available if either the
     // queue was empty prior to enqueue() or queue was emptied during enqueue()
-    if ( ( head == tail ) || ( __c11_atomic_load((_Atomic UInt32 *)&dataQueue->head, __ATOMIC_RELAXED) == tail ) )
+    if ( ( head == tail ) || ( __c11_atomic_load((_Atomic UInt32 *)&dataQueue->head, __ATOMIC_ACQUIRE) == tail ) ) {
         sendDataAvailableNotification();
+    }
 
     return true;
 }
-
 
 void IOHIDResourceQueue::setNotificationPort(mach_port_t port) 
 {
@@ -967,4 +1086,26 @@ IOMemoryDescriptor * IOHIDResourceQueue::getMemoryDescriptor()
         _descriptor = IOSharedDataQueue::getMemoryDescriptor();
 
     return _descriptor;
+}
+
+bool IOHIDResourceQueue::serialize(OSSerialize * serializer) const
+{
+    bool ret = false;
+    
+    if (serializer->previouslySerialized(this)) {
+        return true;
+    }
+    
+    OSDictionary *dict = OSDictionary::withCapacity(2);
+    if (dict) {
+        SET_DICT_NUM(dict, "head", dataQueue->head);
+        SET_DICT_NUM(dict, "tail", dataQueue->tail);
+        SET_DICT_NUM(dict, "QueueSize", _reserved->queueSize);
+        SET_DICT_NUM(dict, "EnqueueTimestamp", _enqueueTS);
+        
+        ret = dict->serialize(serializer);
+        dict->release();
+    }
+    
+    return ret;
 }

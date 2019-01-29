@@ -75,10 +75,10 @@ __BEGIN_DECLS
 typedef struct _IOHIDElementValue
 {
 	IOHIDElementCookie	cookie;
-	UInt32				totalSize;
-	AbsoluteTime		timestamp;
-	UInt32				generation;
-	UInt32				value[1];
+	UInt32              totalSize;
+	AbsoluteTime        timestamp;
+	UInt32              generation;
+	UInt32              value[1];
 }IOHIDElementValue;
 
 typedef struct _IOHIDReportReq
@@ -155,6 +155,7 @@ class IOHIDLibUserClient : public IOUserClient
 	void setValid(bool state);
 	
 	IOReturn dispatchMessage(void* message);
+	bool serializeDebugState(void *ref, OSSerialize *serializer);
 
 public:
 	bool attach(IOService * provider);
@@ -179,6 +180,9 @@ protected:
 	
 	bool fClientOpened;
 	bool fNubIsKeyboard;
+    
+    // entitlements
+    bool _customQueueSizeEntitlement;
 	
 	IOOptionBits fCachedOptionBits;
 		
@@ -188,6 +192,7 @@ protected:
 	
 	bool	fValid;
 	uint64_t fGeneration;
+    
 	// Methods
 	virtual bool initWithTask(task_t owningTask, void *security_id, UInt32 type);
 	
@@ -202,6 +207,8 @@ protected:
 
 	virtual IOReturn message(UInt32 type, IOService * provider, void * argument = 0 );
 	virtual IOReturn messageGated(UInt32 type, IOService * provider, void * argument = 0 );
+	
+	virtual IOReturn setProperties(OSObject *properties) APPLE_KEXT_OVERRIDE;
 
 	virtual IOReturn registerNotificationPort(mach_port_t port, UInt32 type, UInt32 refCon );
 	virtual IOReturn registerNotificationPortGated(mach_port_t port, UInt32 type, UInt32 refCon );

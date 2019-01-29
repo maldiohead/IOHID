@@ -37,6 +37,8 @@
 #include "IOHIDSystem.h"
 #include "IOHIDEventServiceQueue.h"
 
+#define MAX_SCREENS 32  // same as EV_MAX_SCREENS in HIDSystem
+
 class IOHIDUserClient : public IOUserClient
 {
     OSDeclareDefaultStructors(IOHIDUserClient)
@@ -44,6 +46,7 @@ class IOHIDUserClient : public IOUserClient
 private:
 
     IOHIDSystem     *owner;
+    int             _screenTokens[MAX_SCREENS];
 
 public:
     // IOUserClient methods
@@ -63,9 +66,9 @@ public:
                         IOService ** targetP, UInt32 index );
 
     // others
-
-    virtual bool start( IOService * provider );
-    virtual void stop( IOService * provider );
+    virtual bool initWithTask(task_t owningTask, void * /* security_id */, UInt32 /* type */);
+    virtual bool start( IOService * provider ) APPLE_KEXT_OVERRIDE;
+    virtual void stop( IOService * provider ) APPLE_KEXT_OVERRIDE;
     virtual IOReturn close( void );
     
     virtual IOReturn setProperties( OSObject * properties );
@@ -96,6 +99,7 @@ public:
 
     IOReturn extGetUserHidActivityState(void*,void*,void*,void*,void*,void*);
 private:
+    virtual IOReturn clientClose(void) APPLE_KEXT_OVERRIDE;
     virtual IOReturn extPostEvent(void*,void*,void*,void*,void*,void*);
 };
 
@@ -105,14 +109,11 @@ class IOHIDEventSystemUserClient : public IOUserClient
 
 private:
     IOHIDSystem *               owner;
-    //task_t                      client;
     IOHIDEventServiceQueue *    kernelQueue;
-    OSSet *                     userQueues;
     IOCommandGate *             commandGate;
-	static void initialize(void);
-	static UInt32 createIDForDataQueue(IODataQueue * eventQueue);
-	static void removeIDForDataQueue(IODataQueue * eventQueue);
-	static IODataQueue * copyDataQueueWithID(UInt32 queueID);
+    mach_port_t                 _port;
+    
+    IOReturn registerNotificationPortGated(mach_port_t port, UInt32 type, UInt32 refCon);
 
 public:
     virtual bool initWithTask(task_t owningTask, void * security_id, UInt32 type );
